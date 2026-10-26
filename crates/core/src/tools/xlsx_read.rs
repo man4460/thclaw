@@ -21,12 +21,7 @@ impl Tool for XlsxReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract a worksheet from an Excel file (.xlsx/.xlsm/.xlsb/.xls/.ods). \
-         By default returns the first sheet as CSV. Pass `sheet` to pick \
-         a different sheet by name, and `format: \"json\"` to get a typed \
-         2D-array JSON payload (numbers/booleans preserved) instead of CSV. \
-         The first line names the sheet, all sheet names, the used A1 range \
-         and the next empty row — use those for XlsxEdit cell addresses."
+        "Extract a worksheet from .xlsx/.xls/.ods as CSV (default) or typed JSON. Names the sheet, all sheets, the used range and the next empty row — use those for edit addresses."
     }
 
     fn input_schema(&self) -> Value {

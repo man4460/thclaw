@@ -160,16 +160,7 @@ impl Tool for PdfReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract text from a PDF file. Optional `pages` parameter accepts \"all\" \
-         (default), \"3\" (single page), or \"1-5\" (inclusive range). Text comes \
-         from `pdftotext` (poppler-utils) when installed, otherwise from the \
-         document service on the thClaws / organisation gateway. **Scanned / \
-         image-based PDFs** are handled by `ocr`: \"auto\" (default) OCRs the \
-         pages (Thai + English) on the document service and sends pages it is \
-         unsure of to you as images; \"vision\" sends every page as an image \
-         (same as `vision: true`); \"tesseract\" returns OCR text only. The \
-         result says which pages came from OCR (with confidence) and which are \
-         images."
+        "Extract text from a PDF, optionally a page range. Scanned pages are OCR'd (Thai + English) on the document service; `vision` sends pages as images for garbled text layers."
     }
 
     fn input_schema(&self) -> Value {

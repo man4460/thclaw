@@ -61,23 +61,7 @@ impl Tool for EpubCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render markdown to a reflowable EPUB 3 e-book. The reader handles \
-         layout, so text reflows to any screen. Splits the markdown into \
-         chapters at headings (each H1 by default → its own spine item + \
-         navigation entry), converts markdown to XHTML (headings, \
-         **bold**/*italic*/`code`, ordered+unordered lists, blockquotes, \
-         horizontal rules, fenced code blocks, GFM tables, strikethrough, \
-         task lists, footnotes), embeds `![alt](path)` images into the \
-         container, and builds an EPUB 3 nav document plus a toc.ncx \
-         fallback for older readers. Embeds Noto Sans + Noto Sans Thai \
-         (via @font-face) by default — or set `font: \"serif\"` for Noto \
-         Serif + Noto Serif Thai — so Thai renders correctly even on \
-         readers with no Thai font. Pass `content` inline for small books \
-         or `content_path` to render a markdown FILE without copying it \
-         through the conversation (relative image paths then resolve \
-         against that file's directory — use this for book exports). \
-         Optional `cover` image, `author`, and `language` (BCP-47, e.g. \
-         \"th\") metadata."
+        "Render markdown to a reflowable EPUB 3 e-book — text reflows to any screen, chapters split at headings, images + Noto fonts embedded. Use for e-books / long-form reading on e-readers (a PDF is fixed-layout; an EPUB reflows)."
     }
 
     fn input_schema(&self) -> Value {

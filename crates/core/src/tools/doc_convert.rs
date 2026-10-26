@@ -34,15 +34,7 @@ impl Tool for DocConvertTool {
     }
 
     fn description(&self) -> &'static str {
-        "Convert a document to another format on the thClaws document service \
-         (LibreOffice + Chromium, Thai fonts) — nothing to install locally. `path`: \
-         .doc/.docx/.odt/.rtf/.txt/.html, .xls/.xlsx/.ods/.csv or .ppt/.pptx/.odp. \
-         `to`: pdf, docx, xlsx, pptx, odt, ods, odp, html, txt or csv. An .html \
-         file to pdf is typeset by Chromium, with images/CSS beside it sent along. \
-         Writes `<stem>.<to>` beside the source, or `out`; refuses to overwrite. \
-         Use it to make a PDF of a Word/Excel/PowerPoint file, or to open an old \
-         .doc/.xls/.ppt: convert to docx/xlsx/pptx, then read it with \
-         DocxRead/XlsxRead/PptxRead."
+        "Convert a document between formats (Word/Excel/PowerPoint → PDF, legacy .doc/.xls/.ppt/.odt → docx/xlsx/pptx, .html → typeset PDF). Writes beside the source or to `out`; refuses to overwrite."
     }
 
     fn input_schema(&self) -> Value {

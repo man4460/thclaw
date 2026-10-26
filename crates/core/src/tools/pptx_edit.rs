@@ -29,11 +29,7 @@ impl Tool for PptxEditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit a PowerPoint deck (.pptx) in place. Single op for v1: \
-         `find_replace` (per-run substring replace across all slides). \
-         Designed for template-fill workflows: load a template with \
-         `{{placeholder}}` markers, replace each marker with the real \
-         value. Other OOXML parts (theme, layouts, masters) untouched."
+        "Edit a .pptx in place: `find_replace` per-run across all slides. Use for template-fill workflows (load a deck with {{placeholders}}, replace each)."
     }
 
     fn input_schema(&self) -> Value {

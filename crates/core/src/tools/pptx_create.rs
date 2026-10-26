@@ -43,18 +43,7 @@ impl Tool for PptxCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render a markdown outline to a PowerPoint deck (.pptx). Each \
-         `# Heading` starts a new slide (heading is the title); bullet \
-         items become bullet body text. Per-run cs typeface set to \
-         Sarabun so Thai content uses the Thai document font.\n\n\
-         \
-         Native image embedding (`![alt](path)` → `<p:pic>`) is a v2 \
-         enhancement — for now the image source surfaces as a bullet \
-         text placeholder so the caller can see where the image was \
-         intended to go. For decks that need real embedded images, \
-         render to DOCX (full inline-image support) and convert via \
-         the user's slide tool, OR insert images manually in \
-         PowerPoint after generation."
+        "Render a markdown outline to a PowerPoint .pptx — each `# Heading` starts a slide, bullets become body text. Thai text uses Sarabun. Images are not embedded yet (use DOCX + convert for that)."
     }
 
     fn input_schema(&self) -> Value {

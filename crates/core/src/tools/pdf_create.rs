@@ -72,23 +72,7 @@ impl Tool for PdfCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render markdown to a typographically sound PDF. Embedded Noto Sans \
-         Regular/Bold/Italic + Noto Sans Thai Regular/Bold (or set \
-         `font: \"serif\"` for Noto Serif + Noto Serif Thai) — Thai text \
-         wraps at proper cluster boundaries and headings/bold render in \
-         real bold. Supports headings H1-H6 (H1/H2 become PDF outline \
-         bookmarks), paragraphs, **bold** / *italic* / `code`, ordered + \
-         unordered lists with hanging indents, blockquotes, horizontal \
-         rules, fenced code blocks on a shaded background, GFM pipe \
-         tables (bordered grid, shaded bold header, wrapped cells), and \
-         `![caption](path)` images (PNG/JPEG ≤ 5 MB, scaled to page \
-         width, centered, alt text rendered as an italic caption). Pages \
-         get `n / N` footers. Pass `content` inline for small documents \
-         or `content_path` to render a markdown FILE without copying it \
-         through the conversation (relative image paths then resolve \
-         against that file's directory — use this for book exports). Set \
-         `page_break_h1: true` to start every H1 (chapter) on a fresh \
-         page. Page size A4 (default), Letter, or Legal."
+        "Render markdown to a PDF with embedded Noto Sans + Noto Sans Thai (correct Thai cluster shaping). Headings, lists, tables, code blocks, images; A4/Letter/Legal. Use `font: \"serif\"` for the serif family."
     }
 
     fn input_schema(&self) -> Value {

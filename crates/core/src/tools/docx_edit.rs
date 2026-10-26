@@ -34,14 +34,7 @@ impl Tool for DocxEditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit a Word document (.docx) in place. Supported ops: \
-         `find_replace` (per-run substring replace in body text) and \
-         `append_paragraph` (add a new paragraph at end of body). \
-         Other OOXML parts (styles, numbering, headers/footers) are \
-         passed through unchanged. Note: cross-run substrings won't \
-         match — Word splits text on style changes; if you authored \
-         the doc with DocxCreate, paragraphs are single-run so this \
-         is a non-issue."
+        "Edit a .docx in place: `find_replace` (per-run substring) or `append_paragraph`. Other OOXML parts pass through unchanged."
     }
 
     fn input_schema(&self) -> Value {

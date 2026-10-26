@@ -26,10 +26,7 @@ impl Tool for DocxReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract text from a Word document (.docx). Returns the document \
-         body as markdown-ish text: headings prefixed with `#`/`##`/etc., \
-         list items prefixed with `- `, paragraphs separated by blank \
-         lines. Pure Rust — no LibreOffice / pandoc required."
+        "Extract text from a .docx as markdown-ish text: headings, list items, paragraphs. Pure Rust — no LibreOffice needed."
     }
 
     fn input_schema(&self) -> Value {

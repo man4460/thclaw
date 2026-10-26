@@ -31,24 +31,7 @@ impl Tool for XlsxEditTool {
     }
 
     fn description(&self) -> &'static str {
-        "Edit an Excel file (.xlsx) in place. Operations: `set_cell` \
-         (single A1-address; supports `value` OR `formula` plus an \
-         optional `format` block), `set_cells` (2D-array bulk anchored \
-         at a top-left cell), `add_sheet`, `delete_sheet`. Format-\
-         preserving — styles / formulas / charts in unrelated regions \
-         are kept on round-trip.\n\n\
-         \
-         Formula: `formula: \"=SUM(A1:A10)\"` (leading `=` optional) on \
-         `set_cell` writes a formula instead of a literal value. Cell \
-         display value updates the next time Excel / Numbers / \
-         LibreOffice opens the file.\n\n\
-         \
-         Format block (set_cell only for v1): `{bold, italic, \
-         font_color, fill_color, number_format}`. Colors are hex \
-         strings (`\"#RRGGBB\"` or `\"#AARRGGBB\"`); number_format \
-         accepts Excel format codes (`\"0.00\"`, `\"$#,##0.00\"`, \
-         `\"yyyy-mm-dd\"`, etc.). Existing cell style aspects not \
-         named in the block are preserved."
+        "Edit an Excel .xlsx in place, preserving unrelated styles/formulas/charts. Ops: set_cell, set_cells, add_sheet, delete_sheet."
     }
 
     fn input_schema(&self) -> Value {

@@ -1527,3 +1527,22 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod prompt_cost_probe {
+    use super::*;
+
+    #[test]
+    fn print_system_prompt_cost() {
+        let config = crate::config::AppConfig::default();
+        let cwd = std::path::Path::new(".");
+        let p = build_full_system_prompt(&config, cwd, None, &[], SurfaceHints::Repl);
+        let tokens = crate::tokens::estimate_tokens(&p);
+        println!("SYSPROMPT bytes={} tokens~{}", p.len(), tokens);
+        for (i, sec) in p.split("\n# ").enumerate() {
+            if i == 0 { continue; }
+            let head: String = sec.lines().next().unwrap_or("").chars().take(40).collect();
+            println!("  {:>5}  # {}", crate::tokens::estimate_tokens(sec), head);
+        }
+    }
+}

@@ -175,12 +175,7 @@ impl Tool for QuizRenderTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render an interactive study-quiz widget inline in the chat from \
-         { title, questions[] }. Fully self-contained — writes no files, uses \
-         no external server. Supports mcq, truefalse, short (free-text), and \
-         match questions with local grading, per-question feedback, a score \
-         screen, and an answer review. Call this after you have generated the \
-         questions."
+        "Render an interactive study-quiz widget inline in the chat from { title, questions[] }. Self-contained (no files, no server). Call after you have the questions."
     }
 
     fn input_schema(&self) -> Value {

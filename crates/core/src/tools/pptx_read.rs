@@ -23,10 +23,7 @@ impl Tool for PptxReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Extract text from a PowerPoint deck (.pptx). Returns slides in \
-         document order, separated by `---`. Each slide shows its title \
-         (first shape) as `# Title`, followed by remaining text-frame \
-         content. Pure Rust — no LibreOffice / pandoc required."
+        "Extract text from a .pptx, slides in order separated by `---`. Pure Rust — no LibreOffice needed."
     }
 
     fn input_schema(&self) -> Value {

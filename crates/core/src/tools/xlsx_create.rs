@@ -25,16 +25,7 @@ impl Tool for XlsxCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render tabular data to an Excel (.xlsx) file. `data` accepts \
-         three input shapes: (1) a CSV string — single sheet, first row \
-         is headers when `headers: true` (default); (2) a JSON 2D array \
-         of typed cells — single sheet, types preserved (numbers stay \
-         numbers, booleans stay booleans); (3) a JSON array of \
-         `{sheet: \"Name\", rows: [[...]]}` or `{sheet: \"Name\", data: \
-         \"csv string\"}` objects — multi-sheet workbook with one tab \
-         per object. Numbers in CSV cells are auto-detected and written \
-         as numeric cells. Sheet names must be ≤31 chars (Excel limit) \
-         and unique within the workbook."
+        "Render tabular data to an .xlsx. Input may be a CSV string, a JSON 2D array (types preserved), or `[{sheet, rows}]` for multi-sheet. Numbers in CSV are auto-detected."
     }
 
     fn input_schema(&self) -> Value {

@@ -82,14 +82,7 @@ impl Tool for DocxCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Render a markdown string to a Word document (.docx). Supports \
-         headings (H1–H4), paragraphs, bullet + numbered lists, fenced \
-         code blocks, **GFM pipe tables** (header row bolded), inline \
-         emphasis, and **inline images** via `![alt](path)` (PNG/JPEG, \
-         capped at 5 MB; embedded inline at a default 480×360 px). \
-         Run-level fontTable references set Calibri (Latin) + TH \
-         Sarabun New (complex script), so mixed Thai+Latin paragraphs \
-         render correctly without splitting."
+        "Render markdown to a Word .docx: headings H1–H4, paragraphs, lists, fenced code, GFM tables, inline images. Body font is Calibri + TH Sarabun New so mixed Thai/Latin renders correctly."
     }
 
     fn input_schema(&self) -> Value {

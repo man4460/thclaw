@@ -1080,3 +1080,42 @@ mod tests {
         assert!(defs.iter().any(|d| d.name == "WebScrape"));
     }
 }
+
+#[cfg(test)]
+mod token_cost_probe {
+    //! Temporary probe: measure the fixed per-request cost of the built-in
+    //! tool catalog (definitions are re-sent on every request).
+
+    #[test]
+    fn print_tool_def_token_cost() {
+        let r = super::ToolRegistry::with_builtins();
+        let defs = r.tool_defs();
+        let json = serde_json::to_string(&defs).unwrap();
+        let tokens = crate::tokens::estimate_tokens(&json);
+        let mut rows: Vec<(usize, String)> = defs
+            .iter()
+            .map(|d| {
+                let s = serde_json::to_string(d).unwrap();
+                (crate::tokens::estimate_tokens(&s), d.name.clone())
+            })
+            .collect();
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        println!("TOOLS={} BYTES={} TOKENS~{}", defs.len(), json.len(), tokens);
+        for (t, n) in rows.iter().take(40) {
+            println!("  {t:>6}  {n}");
+        }
+        let doc: usize = rows
+            .iter()
+            .filter(|(_, n)| {
+                matches!(
+                    n.as_str(),
+                    "DocxCreate" | "DocxEdit" | "DocxRead" | "XlsxCreate" | "XlsxEdit"
+                        | "XlsxRead" | "PptxCreate" | "PptxEdit" | "PptxRead" | "EpubCreate"
+                        | "PdfCreate" | "PdfRead" | "DocConvert" | "QuizRender"
+                )
+            })
+            .map(|(t, _)| *t)
+            .sum();
+        println!("DOCUMENT GROUP = {doc}");
+    }
+}
