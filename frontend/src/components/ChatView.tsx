@@ -20,7 +20,6 @@ import { ActivityTicker } from "./ActivityTicker";
 import { PlanApprovalCard } from "./PlanApprovalCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { ChatTaskList } from "./ChatTaskList";
-import { ToolRunLine, type ToolRunItem } from "./ToolRunLine";
 import { isShowThinking } from "./showThinking";
 
 type ChatMessage = {
@@ -1343,52 +1342,6 @@ export function ChatView({ active, modalOpen }: Props) {
     el.style.overflowY = sh > maxHeight ? "auto" : "hidden";
   }, [input]);
 
-  // ยุบ tool call ที่ติดกันให้เหลือบรรทัดเดียว (ToolRunLine) — หน้าต่างแชท
-  // ไม่ต้องกลายเป็นกำแพงบรรทัดคำสั่ง หัวข้อ (ข้อความ assistant) ยังคั่นแต่ละช่วง
-  // ตามเดิม. TodoWrite / MCP widget ไม่ยุบ เพราะมี card ของตัวเอง.
-  const toolRuns = useMemo(() => {
-    const starts = new Map<number, ToolRunItem[]>();
-    const skip = new Set<number>();
-    let cur: ToolRunItem[] = [];
-    let start = -1;
-    let indices: number[] = [];
-    const flush = () => {
-      if (cur.length > 0) {
-        starts.set(start, cur);
-        for (const k of indices.slice(1)) skip.add(k);
-      }
-      cur = [];
-      indices = [];
-      start = -1;
-    };
-    messages.forEach((m, i) => {
-      // ข้อความที่วาดไม่ออก (assistant ว่าง / system ว่าง) ไม่ควรตัดกลุ่ม
-      // — engine แทรกข้อความเปล่าระหว่าง tool call ได้ มองเห็นเป็นบรรทัด
-      // ติดกัน แต่ถ้านับเป็นตัวคั่น กลุ่มจะถูกตัดทุกลูก ไม่ยุบเลย
-      const invisible =
-        (m.role === "assistant" && m.content.trim() === "" &&
-          !(showThinking && m.thinking)) ||
-        (m.role === "system" && m.content.trim() === "");
-      if (invisible) return;
-      const plain =
-        m.role === "tool" &&
-        !m.uiResource &&
-        !(m.toolKind === "TodoWrite" && m.toolInput);
-      if (!plain) {
-        flush();
-        return;
-      }
-      if (start < 0) start = i;
-      indices.push(i);
-      cur.push({
-        label: m.toolName ?? m.content,
-        done: m.toolDone === true,
-      });
-    });
-    flush();
-    return { starts, skip };
-  }, [messages, showThinking]);
-
   const messageElements = useMemo(
     () =>
       messages.map((msg, i) => {
@@ -1421,14 +1374,11 @@ export function ChatView({ active, modalOpen }: Props) {
             />
           );
         }
-        // กลุ่ม tool ที่ติดกัน → 1 บรรทัดวิ่งสลับ (ดู toolRuns ด้านบน)
-        if (toolRuns.skip.has(i)) return null;
-        const run = toolRuns.starts.get(i);
-        if (run) return <ToolRunLine key={i} items={run} />;
-
         if (msg.role === "tool") {
-          // TodoWrite ถูกย้ายไป ChatTaskList แล้ว — ไม่ต้องมีบรรทัดในสตรีม
-          if (msg.toolKind === "TodoWrite") return null;
+          // tool ทั้งหมดไม่อยู่ในสตรีมแล้ว — หัวข้ออยู่ที่ ChatTaskList
+          // (ปักเหนือช่องพิมพ์) รายละเอียด/คำสั่งอยู่ที่ ActivityTicker
+          // (แถบล่างสลับให้เห็น). ยกเว้น MCP widget ที่มี UI ของตัวเอง.
+          if (!msg.uiResource) return null;
           const glyph = msg.toolDone ? "✓" : "▸";
           const copied = copiedMessageIndex === i;
           // MCP-Apps tools widen the bubble so the embedded iframe
@@ -1490,6 +1440,15 @@ export function ChatView({ active, modalOpen }: Props) {
         }
 
         const isAssistant = msg.role === "assistant";
+        // ข้อความ assistant ที่ว่างเปล่า (engine ส่งมาระหว่าง tool call)
+        // ไม่ต้องวาดเป็นบับเบิ้ลดำ ๆ — ไม่มีอะไรให้อ่าน
+        if (
+          isAssistant &&
+          msg.content.trim() === "" &&
+          !(showThinking && msg.thinking)
+        ) {
+          return null;
+        }
         const isSystem = msg.role === "system";
         const isError = msg.role === "error";
         const copied = copiedMessageIndex === i;
@@ -1691,7 +1650,7 @@ export function ChatView({ active, modalOpen }: Props) {
           </div>
         );
       }),
-    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking, toolRuns],
+    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking],
   );
 
   const awaitingUserAnswer = askPrompt !== null;
