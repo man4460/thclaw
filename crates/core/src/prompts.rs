@@ -712,7 +712,11 @@ Anchors turn the next session's first read into one precise slice.\n\
 approach is confirmed to work, record it: `Lesson(op: \"record\", key: \"…\", \
 text: \"…\", kind: \"correction\")`. Repeats raise the count; \
 `Lesson(op: \"distill\")` promotes twice-seen lessons into a rules file that \
-loads automatically next session, so the same mistake is not repeated.\n";
+loads automatically next session, so the same mistake is not repeated.\n\
+- After a non-trivial change, don't grade your own work: delegate an \
+adversarial pass to `Task(agent: \"code-reviewer\", prompt: \"review <what and \
+where> — does it do what it claims, what breaks, and what check proves it\")`. \
+The model that wrote the code is the worst reviewer of it.\n";
 
 /// Team-collaboration framing. Four states (preserved verbatim from
 /// the original implementation in `shared_session.rs`):

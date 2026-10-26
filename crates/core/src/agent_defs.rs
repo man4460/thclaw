@@ -272,6 +272,10 @@ impl AgentDefsConfig {
                 "codebase-scholar",
                 include_str!("default_prompts/codebase-scholar.md"),
             ),
+            (
+                "code-reviewer",
+                include_str!("default_prompts/code-reviewer.md"),
+            ),
             ("translator", include_str!("default_prompts/translator.md")),
             ("summarizer", include_str!("default_prompts/summarizer.md")),
             ("explore", include_str!("default_prompts/explore.md")),
@@ -1022,6 +1026,19 @@ plugin-only reviewer
         assert!(!indexer.tools.iter().any(|t| t == "Write"));
         assert!(!indexer.tools.iter().any(|t| t == "Edit"));
         assert!(!indexer.tools.iter().any(|t| t == "Bash"));
+    }
+
+    #[test]
+    fn seed_builtins_includes_code_reviewer() {
+        let config = AgentDefsConfig::load();
+        let r = config
+            .agents
+            .iter()
+            .find(|a| a.name == "code-reviewer")
+            .expect("code-reviewer built-in missing");
+        assert!(r.tools.iter().any(|t| t == "GitHistory"));
+        assert!(r.tools.iter().any(|t| t == "GitStatus"));
+        assert!(!r.instructions.is_empty());
     }
 
     #[test]
