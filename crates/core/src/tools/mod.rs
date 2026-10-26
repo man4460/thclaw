@@ -31,6 +31,7 @@ pub mod gui_shell;
 pub mod hal;
 pub mod image_gen;
 pub mod kms;
+pub mod lesson;
 pub mod ls;
 pub mod md_tables;
 pub mod memory;
@@ -81,6 +82,7 @@ pub use kms::{
     KmsAppendTool, KmsCreateTool, KmsDeleteTool, KmsEditTool, KmsReadTool, KmsSearchTool,
     KmsWriteSourceTool, KmsWriteTool,
 };
+pub use lesson::LessonTool;
 pub use ls::LsTool;
 pub use memory::{MemoryAppendTool, MemoryReadTool, MemoryWriteTool};
 pub use pdf_create::PdfCreateTool;
@@ -426,6 +428,7 @@ impl ToolRegistry {
         r.register(Arc::new(RepoMapTool));
         r.register(Arc::new(GitStatusTool));
         r.register(Arc::new(WorkLogTool));
+        r.register(Arc::new(LessonTool));
         r.register(Arc::new(BashTool::default()));
         r.register(Arc::new(DocxCreateTool));
         r.register(Arc::new(DocxEditTool));

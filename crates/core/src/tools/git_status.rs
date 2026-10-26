@@ -63,10 +63,7 @@ impl Tool for GitStatusTool {
         };
 
         if !run(&["rev-parse", "--is-inside-work-tree"], &cwd).status {
-            return Ok(format!(
-                "{} is not a git repository.",
-                cwd.display()
-            ));
+            return Ok(format!("{} is not a git repository.", cwd.display()));
         }
 
         let mut out = String::new();
@@ -172,8 +169,14 @@ mod tests {
             .unwrap();
 
         assert!(out.contains("branch:"), "should show branch: {out}");
-        assert!(out.contains("new_feature.rs"), "untracked file listed: {out}");
-        assert!(out.contains("M a.txt") || out.contains("a.txt"), "modification listed: {out}");
+        assert!(
+            out.contains("new_feature.rs"),
+            "untracked file listed: {out}"
+        );
+        assert!(
+            out.contains("M a.txt") || out.contains("a.txt"),
+            "modification listed: {out}"
+        );
         assert!(out.contains("recent commits:"), "history section: {out}");
         assert!(out.contains("init"), "commit present: {out}");
     }

@@ -700,7 +700,19 @@ see a large file's signatures for ~1% of the tokens. `git log --oneline -20` \
 to see what changed recently instead of reading everything.\n\
 - Size the process to the work: a one-line fix needs no plan, a multi-file \
 change gets a `TodoWrite` list first, and a job with real steps and runnable \
-checks goes through plan mode.\n";
+checks goes through plan mode.\n\
+- In an existing project, start with `GitStatus` and `WorkLog(op: \"read\")`. \
+They show uncommitted work from a previous session (already-built features \
+you must not re-create) and the `path:start-end` ranges the last session was \
+working on — read those spans instead of re-exploring.\n\
+- When you finish a meaningful chunk in a project, append it to the journal: \
+`WorkLog(op: \"append\", summary: \"…\", files: [\"src/x.rs:40-90\"], next: \"…\")`. \
+Anchors turn the next session's first read into one precise slice.\n\
+- When the user corrects you, a test disproves your assumption, or an \
+approach is confirmed to work, record it: `Lesson(op: \"record\", key: \"…\", \
+text: \"…\", kind: \"correction\")`. Repeats raise the count; \
+`Lesson(op: \"distill\")` promotes twice-seen lessons into a rules file that \
+loads automatically next session, so the same mistake is not repeated.\n";
 
 /// Team-collaboration framing. Four states (preserved verbatim from
 /// the original implementation in `shared_session.rs`):

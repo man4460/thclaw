@@ -238,7 +238,14 @@ fn set_focus(path: &Path, block: &str) -> Result<()> {
         parts.push(line.to_string());
     }
     let body = parts.join("\n").trim_start().to_string();
-    let out = format!("{block}{}", if body.is_empty() { String::new() } else { format!("\n{body}\n") });
+    let out = format!(
+        "{block}{}",
+        if body.is_empty() {
+            String::new()
+        } else {
+            format!("\n{body}\n")
+        }
+    );
     write_atomic(path, &out)
 }
 
@@ -283,7 +290,12 @@ fn render_read(raw: &str, tail: usize, path: &Path) -> String {
         .collect();
     let start = entries.len().saturating_sub(tail);
 
-    let mut out = format!("worklog — {} ({} entries, showing last {})\n", path.display(), entries.len(), entries.len() - start);
+    let mut out = format!(
+        "worklog — {} ({} entries, showing last {})\n",
+        path.display(),
+        entries.len(),
+        entries.len() - start
+    );
     if let Some(f) = focus {
         out.push('\n');
         out.push_str(&f);

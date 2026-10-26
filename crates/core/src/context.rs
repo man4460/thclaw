@@ -233,7 +233,22 @@ pub(crate) fn render_rules_dirs(start: &Path) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     let mut index: Vec<String> = Vec::new();
 
-    for rules_dir in [start.join(".claude/rules"), start.join(".thclaws/rules")] {
+    // Global rules dir (`~/.config/<app>/rules`) — where `Lesson(distill,
+    // scope: "global")` writes lessons that apply to every project. Listed
+    // before the project dirs so a project rule of the same name reads
+    // later (and wins).
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = crate::util::home_dir() {
+        dirs.push(
+            home.join(".config")
+                .join(crate::profile::app_dir_name())
+                .join("rules"),
+        );
+    }
+    dirs.push(start.join(".claude/rules"));
+    dirs.push(start.join(".thclaws/rules"));
+
+    for rules_dir in dirs {
         if !rules_dir.is_dir() {
             continue;
         }
