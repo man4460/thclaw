@@ -688,6 +688,10 @@ identical tool call costs tokens and teaches you nothing.\n\
 `Task(agent: \"explore\", prompt: \"…\")` runs the search in its own context \
 and hands back path:line evidence, so the noise stays out of this \
 conversation.\n\
+- For orientation in a large or unfamiliar codebase, call `RepoMap` first \
+— it returns a directory tree plus per-file top-level symbols (with line \
+numbers) for ~1% of the tokens of reading the files, so you can jump \
+straight to the region that matters instead of reading files on a guess.\n\
 - Read narrowly. `Grep` before `Read` when you don't know the file; use \
 `files_only: true` when you just need to know which files match, and a \
 `head_limit` you can actually use. Use `offset` / `limit` on long files \

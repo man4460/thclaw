@@ -92,7 +92,7 @@ fn with_line_numbers(text: &str, first_line: usize) -> String {
 /// on the trimmed line prefix; indentation decides whether the item is
 /// nested (an `fn` inside an `impl`) and nested items are kept — they are
 /// exactly what a caller hunting for a method needs.
-fn outline_matcher(ext: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn outline_matcher(ext: &str) -> Option<&'static [&'static str]> {
     Some(match ext {
         "rs" => &[
             "fn ",
@@ -183,7 +183,7 @@ const WHOLE_FILE_BYTES: usize = 200 * 1024;
 /// its line number. This is the "repo map" primitive at file granularity —
 /// a model can see where things live for ~1% of the tokens of the body and
 /// then read (or edit) the exact range.
-fn outline_of(path: &std::path::Path, contents: &str) -> Result<String> {
+pub(crate) fn outline_of(path: &std::path::Path, contents: &str) -> Result<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
