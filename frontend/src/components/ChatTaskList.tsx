@@ -34,6 +34,29 @@ type PlanLike = {
 };
 
 const MAX_VISIBLE = 6;
+/// ความยาวสูงสุดของหัวข้อที่แสดง — todo ที่ model เขียนมามักยาวและมี
+/// รายละเอียดปน ("ตรวจ DB → กำลังนับแถว module_list (42 แถว)") ซึ่งอ่านยาก
+/// ในแถวเดียว. ตัดให้เหลือสาระสั้น ๆ แล้วเก็บข้อความเต็มไว้ใน tooltip.
+const MAX_LABEL_CHARS = 46;
+
+/** ตัดข้อความ todo ให้เหลือหัวข้อสั้นที่ได้ใจความ */
+function shortLabel(text: string): string {
+  // markdown/backtick noise ไม่ช่วยอะไรในแถวเดียว
+  let s = text.replace(/[*`_]/g, "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+
+  // ประโยคแรกก่อนตัวคั่นที่มีความหมาย (แต่ต้องเหลืออะไรพออ่าน)
+  const cut = s.search(/[—·|:]|\s→\s|→/);
+  if (cut >= 8) s = s.slice(0, cut).trim();
+
+  // ตัดที่ขอบคำ/ช่องว่างใกล้เพดาน มากกว่าตัดกลางคำ
+  if (s.length > MAX_LABEL_CHARS) {
+    const head = s.slice(0, MAX_LABEL_CHARS);
+    const boundary = Math.max(head.lastIndexOf(" "), head.lastIndexOf("→"));
+    s = (boundary >= 20 ? head.slice(0, boundary) : head).trim() + "…";
+  }
+  return s;
+}
 
 export function ChatTaskList() {
   const [todos, setTodos] = useState<Task[]>([]);
@@ -96,7 +119,7 @@ export function ChatTaskList() {
         </span>
         {active && (
           <span className="truncate" style={{ color: "var(--text-primary)" }} title={active.text}>
-            · {active.text}
+            · {shortLabel(active.text)}
           </span>
         )}
         {(hidden > 0 || expanded) && (
@@ -175,7 +198,7 @@ export function ChatTaskList() {
                   opacity: finished ? 0.75 : 1,
                 }}
               >
-                {t.text}
+                {shortLabel(t.text)}
               </span>
             </div>
           );
