@@ -34,7 +34,6 @@ import { RunningChip } from "./components/RunningChip";
 import { useBusyState } from "./hooks/useBusyState";
 import { useTheme } from "./hooks/useTheme";
 import { Sidebar } from "./components/Sidebar";
-import { PlanSidebar } from "./components/PlanSidebar";
 import { GoalSidebar } from "./components/GoalSidebar";
 import { ResearchSidebar } from "./components/ResearchSidebar";
 import { BackgroundAgentsSidebar } from "./components/BackgroundAgentsSidebar";
@@ -1393,11 +1392,6 @@ export default function App() {
             when no /goal is active. Independent from plan-state — a
             session can carry both, one, or neither. */}
         <GoalSidebar />
-        {/* Plan-mode sidebar (M1). Renders nothing when no plan is
-            active — plan_state's broadcaster fires `chat_plan_update`
-            with `null` to clear it on `/new` / `/load` of a plan-less
-            session. Mounted on the right by design (Cowork pattern). */}
-        <PlanSidebar />
         {/* Research sidebar (M6.39.5). Mirrors PlanSidebar's
             right-edge layout but shows /research pipeline progression
             verbosely — current phase, iteration progress, score
