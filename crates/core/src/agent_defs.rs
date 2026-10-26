@@ -270,6 +270,7 @@ impl AgentDefsConfig {
             ("dream", include_str!("default_prompts/dream.md")),
             ("translator", include_str!("default_prompts/translator.md")),
             ("summarizer", include_str!("default_prompts/summarizer.md")),
+            ("explore", include_str!("default_prompts/explore.md")),
             (
                 "content-extractor",
                 include_str!("default_prompts/content-extractor.md"),
@@ -1017,6 +1018,29 @@ plugin-only reviewer
         assert!(!indexer.tools.iter().any(|t| t == "Write"));
         assert!(!indexer.tools.iter().any(|t| t == "Edit"));
         assert!(!indexer.tools.iter().any(|t| t == "Bash"));
+    }
+
+    #[test]
+    fn seed_builtins_includes_explore() {
+        let mut config = AgentDefsConfig::default();
+        config.seed_builtins();
+        let explore = config
+            .get("explore")
+            .expect("built-in explore agent should be seeded");
+        assert_eq!(explore.name, "explore");
+        assert!(!explore.instructions.is_empty());
+        // Read-only by construction: no tool in its list can mutate.
+        assert!(explore.tools.iter().any(|t| t == "Read"));
+        assert!(explore.tools.iter().any(|t| t == "Grep"));
+        assert!(explore.tools.iter().any(|t| t == "Glob"));
+        for forbidden in ["Write", "Edit", "Bash", "Task"] {
+            assert!(
+                !explore.tools.iter().any(|t| t == forbidden),
+                "explore must not have {forbidden}"
+            );
+        }
+        // No pinned model — it runs on the session's active model.
+        assert_eq!(explore.model.as_deref(), None);
     }
 
     #[test]

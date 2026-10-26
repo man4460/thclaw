@@ -78,6 +78,56 @@ pub enum AgentEvent {
     },
 }
 
+/// Key for the anti-repeat guard: `Some(name + exact args)` when re-running
+/// the identical call in the same turn would return the identical answer.
+/// Time-dependent and mutating tools return `None` — they also invalidate
+/// everything remembered before them.
+pub fn reusable_read_key(name: &str, input: &Value) -> Option<String> {
+    const REUSABLE: &[&str] = &[
+        "Read",
+        "Grep",
+        "Glob",
+        "Ls",
+        "KmsRead",
+        "KmsSearch",
+        "PdfRead",
+        "DocxRead",
+        "PptxRead",
+        "XlsxRead",
+    ];
+    if REUSABLE.contains(&name) {
+        return Some(format!("{name}\u{1}{input}"));
+    }
+    if name == "Bash" {
+        let cmd = input.get("command").and_then(Value::as_str)?;
+        if crate::tools::bash::is_read_only_command(cmd) {
+            return Some(format!("Bash\u{1}{input}"));
+        }
+    }
+    None
+}
+
+/// Plan mode admits a tool when it doesn't require approval — or when it is
+/// `Bash` and the command line only reads (`is_read_only_command`).
+///
+/// Dynamic-context-discovery fix: pre-fix every Bash call was refused during
+/// planning because `BashTool::requires_approval` is unconditionally true, so
+/// the model had to plan from guesses and then re-explore after approval.
+/// A read-only command (`git log`, `grep`, `ls`, `mysql -e "SELECT …"`) gives
+/// it the real context while the plan is still being written, and the write
+/// half stays blocked.
+pub fn plan_mode_permits(name: &str, input: &Value, requires_approval: bool) -> bool {
+    if !requires_approval {
+        return true;
+    }
+    if name == "Bash" {
+        if let Some(cmd) = input.get("command").and_then(Value::as_str) {
+            return crate::tools::bash::is_read_only_command(cmd);
+        }
+    }
+    false
+}
+
 /// Build the dynamic plan-mode reminder appended to the system prompt
 /// at the start of each turn. Returns `None` when no reminder applies
 /// (mode != Plan and no active plan).
@@ -108,11 +158,15 @@ pub fn build_plan_reminder(
     match (mode, plan) {
         (PermissionMode::Plan, None) => Some(
             "## Plan mode is active\n\n\
-             Mutating tools (Write, Edit, Bash, document editors, etc.) \
-             are BLOCKED. Use Read / Grep / Glob / Ls to explore the \
-             codebase. When you have enough context, call SubmitPlan \
-             with an ordered list of concrete, testable steps. The \
-             user will review the plan in the right-side sidebar and \
+             Mutating tools (Write, Edit, document editors, etc.) are \
+             BLOCKED. Use Read / Grep / Glob / Ls for structured \
+             exploration, and Bash for read-only commands — `ls`, `cat`, \
+             `grep`, `rg`, `find`, `wc`, `git log|status|diff|show`, \
+             `mysql -e \"SELECT …\"`. Anything that writes (redirects, \
+             `tee`, `sed -i`, `find -exec`, `rm`, package installs, \
+             `git commit`) is refused. When you have enough context, call \
+             SubmitPlan with an ordered list of concrete, testable steps. \
+             The user will review the plan in the right-side sidebar and \
              approve before execution.\n\n\
              Do NOT call TodoWrite in plan mode — SubmitPlan is the \
              structured replacement that the user can see live.\n\n\
@@ -1448,6 +1502,15 @@ impl Agent {
             let mut degen_sig: Option<String> = None;
             let mut degen_count: u32 = 0;
 
+            // Anti-repeat guard: read-only calls that already succeeded this
+            // turn, keyed by name + exact arguments. A second identical call
+            // returns a pointer to the earlier result instead of the same
+            // payload — the "analyse, analyse again" loop costs tokens and
+            // teaches the model nothing. Cleared whenever a call that could
+            // have changed the answer runs.
+            let mut recent_reads: Vec<String> = Vec::new();
+            const RECENT_READS_CAP: usize = 6;
+
             // 0 means unlimited.
             let effective_max = if max_iterations == 0 { usize::MAX } else { max_iterations };
             // Prototype: thinking is a session-wide setting, but a browse is
@@ -2217,11 +2280,13 @@ impl Agent {
                     }
 
                     if matches!(permission_mode, PermissionMode::Plan)
-                        && tool.requires_approval(input)
+                        && !plan_mode_permits(name, input, tool.requires_approval(input))
                     {
                         let blocked = format!(
-                            "Blocked: {name} is not available in plan mode. \
-                             Use Read / Grep / Glob / Ls to explore the codebase. \
+                            "Blocked: {name} is not available in plan mode with these \
+                             arguments. Plan mode is read-only exploration — use Read / \
+                             Grep / Glob / Ls, or Bash with a read-only command (ls, cat, \
+                             grep, rg, find, wc, git log/status/diff/show, mysql SELECT). \
                              When you have enough context, call SubmitPlan with an \
                              ordered list of concrete steps. The user will review \
                              and approve before execution."
@@ -2282,6 +2347,37 @@ impl Agent {
                             ui_resource: None,
                         };
                         continue;
+                    }
+
+                    // Anti-repeat gate: the same Read/Grep/Glob/Ls/Bash-read
+                    // call already ran this turn and nothing that could have
+                    // changed its answer ran since. Hand back a pointer to the
+                    // earlier result instead of re-running it. `is_error` is
+                    // false — this is a hint, not a failure, so the model
+                    // doesn't try to "recover" from it.
+                    let read_key = reusable_read_key(name, input);
+                    if let Some(key) = &read_key {
+                        if recent_reads.iter().any(|k| k == key) {
+                            let note = format!(
+                                "Skipped: this exact {name} call already ran earlier in this \
+                                 turn and its result is in the conversation above. Nothing it \
+                                 depends on has changed since (no write or command ran after \
+                                 it). Use that earlier result — re-read only if you have a \
+                                 specific reason to believe the content changed."
+                            );
+                            result_blocks.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: note.clone().into(),
+                                is_error: false,
+                            });
+                            yield AgentEvent::ToolCallResult {
+                                id: id.clone(),
+                                name: name.clone(),
+                                output: Ok(note),
+                                ui_resource: None,
+                            };
+                            continue;
+                        }
                     }
 
                     // Approval gate. `asks_for_approval()` covers
@@ -2432,6 +2528,23 @@ impl Agent {
                         content: content.clone(),
                         is_error,
                     });
+
+                    if let Some(key) = read_key {
+                        // Remember the successful read so an identical
+                        // re-call short-circuits; cap keeps it bounded.
+                        // A failed call is not remembered — retrying it is
+                        // legitimate.
+                        if !is_error && !recent_reads.iter().any(|k| k == &key) {
+                            if recent_reads.len() >= RECENT_READS_CAP {
+                                recent_reads.remove(0);
+                            }
+                            recent_reads.push(key);
+                        }
+                    } else {
+                        // Anything else may have changed files, the repo, or
+                        // the world — stale hits must not survive it.
+                        recent_reads.clear();
+                    }
 
                     // For MCP-Apps tools, fetch the widget HTML so the
                     // chat surface can mount an iframe alongside the
@@ -3687,6 +3800,70 @@ mod tests {
         assert!(r.contains("Read / Grep"));
         assert!(r.contains("SubmitPlan"));
         assert!(r.contains("Do NOT call TodoWrite"));
+        // Dynamic context discovery: read-only Bash is part of exploration.
+        assert!(r.contains("git log"));
+        assert!(r.contains("read-only"));
+    }
+
+    #[test]
+    fn reusable_read_key_covers_reads_and_never_mutations() {
+        use serde_json::json;
+        // Same name + same args → same key (the repeat is detectable), and
+        // different args → different keys.
+        assert_eq!(
+            reusable_read_key("Read", &json!({"path": "a.rs"})),
+            reusable_read_key("Read", &json!({"path": "a.rs"}))
+        );
+        assert_ne!(
+            reusable_read_key("Read", &json!({"path": "a.rs"})),
+            reusable_read_key("Read", &json!({"path": "b.rs"}))
+        );
+        assert!(reusable_read_key("Grep", &json!({"pattern": "x"})).is_some());
+        // Read-only Bash qualifies.
+        assert!(reusable_read_key("Bash", &json!({"command": "git status"})).is_some());
+        // Writing Bash does not — and neither does any mutating tool.
+        assert!(reusable_read_key("Bash", &json!({"command": "rm -rf x"})).is_none());
+        assert!(reusable_read_key("Write", &json!({"path": "a"})).is_none());
+        assert!(reusable_read_key("Edit", &json!({"path": "a"})).is_none());
+        // Time-dependent results must never be replayed.
+        assert!(reusable_read_key("WebSearch", &json!({"query": "x"})).is_none());
+    }
+
+    #[test]
+    fn plan_mode_admits_read_only_bash_and_blocks_mutations() {
+        use serde_json::json;
+        // Read-only Bash runs during planning.
+        assert!(plan_mode_permits(
+            "Bash",
+            &json!({"command": "git log --oneline -5"}),
+            true
+        ));
+        assert!(plan_mode_permits(
+            "Bash",
+            &json!({"command": "ls -la"}),
+            true
+        ));
+        assert!(plan_mode_permits(
+            "Bash",
+            &json!({"command": "grep -rn TODO crates/core/src"}),
+            true
+        ));
+        // Writing Bash stays blocked.
+        assert!(!plan_mode_permits(
+            "Bash",
+            &json!({"command": "rm -rf build"}),
+            true
+        ));
+        assert!(!plan_mode_permits(
+            "Bash",
+            &json!({"command": "echo hi > f.txt"}),
+            true
+        ));
+        // Missing command = not provably read-only.
+        assert!(!plan_mode_permits("Bash", &json!({}), true));
+        // Tools that don't need approval always pass; mutating tools don't.
+        assert!(plan_mode_permits("Read", &json!({"path": "x"}), false));
+        assert!(!plan_mode_permits("Write", &json!({"path": "x"}), true));
     }
 
     #[test]

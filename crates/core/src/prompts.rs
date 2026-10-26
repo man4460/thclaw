@@ -246,6 +246,12 @@ pub fn build_full_system_prompt(
         system.push_str(&collaboration_section);
     }
 
+    // (7b) Context discipline — how to gather context without looping.
+    // Pairs with the `explore` built-in agent: the model can delegate a
+    // broad search instead of dragging every hit through this history.
+    system.push_str("\n\n");
+    system.push_str(CONTEXT_DISCIPLINE_SECTION);
+
     // (8) Team grounding (config-gated inside the helper)
     let team_section = team_grounding_prompt(&config.model, team_enabled);
     if !team_section.is_empty() {
@@ -477,7 +483,10 @@ pub(crate) fn collaboration_primitives_section(team_enabled: bool) -> String {
     let subagent = "**Subagent** — the `Task` tool launches one scoped child \
          agent that returns a transcript when done. Always available. \
          Use for a side-quest that would clutter history, a read-only \
-         sweep, or a well-defined delegation. To fan out, emit SEVERAL \
+         sweep, or a well-defined delegation — for a codebase question \
+         (\"where is X handled\", \"what calls Y\") prefer \
+         `Task(agent: \"explore\")`, which searches in its own context and \
+         returns path:line evidence. To fan out, emit SEVERAL \
          `Task` calls in ONE message — they run concurrently. A lone \
          `Task` call, or one batched with a tool that isn't read-only, \
          runs sequentially.";
@@ -661,6 +670,30 @@ pub(crate) fn append_skills_section(
         }
     }
 }
+
+/// Context-gathering discipline, appended to every system prompt.
+///
+/// Cursor's advantage is context engineering, not the model: it explores
+/// narrowly, delegates broad searches to a sub-agent, and doesn't re-read
+/// what it already knows. This section states those rules explicitly so the
+/// loop behaviour doesn't depend on the model's own habits.
+pub(crate) const CONTEXT_DISCIPLINE_SECTION: &str = "# Context discipline\n\n\
+- Explore until the question is answered, then stop. Two or three targeted \
+searches (Grep for an exact identifier, Glob for a filename) beat reading \
+whole files on a guess.\n\
+- Never repeat a search or re-read a file for the same reason. If nothing \
+changed since you last looked, reuse what you already have — a second \
+identical tool call costs tokens and teaches you nothing.\n\
+- For a broad or \"where is X / what calls Y\" question, delegate: \
+`Task(agent: \"explore\", prompt: \"…\")` runs the search in its own context \
+and hands back path:line evidence, so the noise stays out of this \
+conversation.\n\
+- Read narrowly. `Grep` before `Read` when you don't know the file; use \
+`offset` / `limit` on long files; `git log --oneline -20` to see what \
+changed recently instead of reading everything.\n\
+- Size the process to the work: a one-line fix needs no plan, a multi-file \
+change gets a `TodoWrite` list first, and a job with real steps and runnable \
+checks goes through plan mode.\n";
 
 /// Team-collaboration framing. Four states (preserved verbatim from
 /// the original implementation in `shared_session.rs`):
@@ -1128,6 +1161,20 @@ mod tests {
         eprintln!("\nCompare with:");
         eprintln!("  diff /tmp/thclaws-prompt-gui.txt /tmp/thclaws-prompt-repl.txt");
         eprintln!("  diff /tmp/thclaws-prompt-gui.txt /tmp/thclaws-prompt-headless.txt");
+    }
+
+    /// The context-discipline section is what keeps the agent from looping:
+    /// it must name the `explore` delegate and the no-repeat rule.
+    #[test]
+    fn context_discipline_section_states_the_anti_loop_rules() {
+        let s = CONTEXT_DISCIPLINE_SECTION;
+        assert!(s.contains("# Context discipline"));
+        assert!(
+            s.contains("agent: \"explore\""),
+            "must name the explore agent"
+        );
+        assert!(s.contains("Never repeat a search"), "must forbid repeats");
+        assert!(s.contains("TodoWrite"), "must size the process to the work");
     }
 
     /// `collaboration_primitives_section`: Subagent + WorkflowRun are always

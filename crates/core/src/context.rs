@@ -216,6 +216,93 @@ fn is_v3_tombstone(contents: &str) -> bool {
     contents == V3_TOMBSTONE
 }
 
+/// Render `.claude/rules/*.md` + `.thclaws/rules/*.md` into prompt parts.
+///
+/// Cursor-style scoping: a rule FILE may carry frontmatter with a
+/// `description:` (and/or `globs:`). Those rules are listed as a one-line
+/// index in the prompt and read on demand — otherwise every rule rides
+/// every turn forever, which is what makes a big rules folder expensive.
+/// A rule with `alwaysApply: true`, or with no frontmatter at all, is loaded
+/// in full — so every rules file written before this change behaves exactly
+/// as it did.
+///
+/// Returns the index section first (when any rule is deferred), then each
+/// full-text rule in directory order, so thClaws-native rules still come
+/// after Claude Code's.
+pub(crate) fn render_rules_dirs(start: &Path) -> Vec<String> {
+    let mut full: Vec<String> = Vec::new();
+    let mut index: Vec<String> = Vec::new();
+
+    for rules_dir in [start.join(".claude/rules"), start.join(".thclaws/rules")] {
+        if !rules_dir.is_dir() {
+            continue;
+        }
+        let mut rule_files: Vec<PathBuf> = std::fs::read_dir(&rules_dir)
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default();
+        rule_files.sort();
+
+        for path in rule_files {
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (fm, body) = crate::memory::parse_frontmatter(&contents);
+            let always = fm.iter().any(|(k, v)| {
+                (k.eq_ignore_ascii_case("alwaysapply") || k.eq_ignore_ascii_case("always_apply"))
+                    && v.trim().eq_ignore_ascii_case("true")
+            });
+
+            // No frontmatter → legacy rule file, load it whole.
+            if fm.is_empty() {
+                full.push(contents);
+                continue;
+            }
+            if always {
+                if !body.trim().is_empty() {
+                    full.push(body);
+                }
+                continue;
+            }
+
+            let rel = path
+                .strip_prefix(start)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let desc = fm
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("description"))
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default();
+            index.push(if desc.is_empty() {
+                format!("- `{rel}`")
+            } else {
+                format!("- `{rel}` — {desc}")
+            });
+        }
+    }
+
+    let mut out = Vec::new();
+    if !index.is_empty() {
+        out.push(format!(
+            "# Project rules (index)\n\n\
+             These rule files are not loaded in full. Before starting a task, \
+             read the one whose description matches it with `Read` — do not \
+             load them all.\n\n{}",
+            index.join("\n")
+        ));
+    }
+    out.extend(full);
+    out
+}
+
 /// `<…>/.thclaws/bots` — the shelf a bot sits on. Reaching it while walking
 /// up means the walk has left the bot and entered the host.
 fn is_bot_shelf(dir: &Path) -> bool {
@@ -341,28 +428,9 @@ pub fn find_claude_md_with(start: &Path, claude_md_compat: bool) -> Option<Strin
 
     // 4. Rules directories — `.claude/rules/*.md` then `.thclaws/rules/*.md`,
     // each sorted alphabetically, concatenated in order so thClaws-native
-    // rules can override Claude Code's.
-    for rules_dir in [start.join(".claude/rules"), start.join(".thclaws/rules")] {
-        if !rules_dir.is_dir() {
-            continue;
-        }
-        let mut rule_files: Vec<PathBuf> = std::fs::read_dir(&rules_dir)
-            .ok()
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
-                    .map(|e| e.path())
-                    .collect()
-            })
-            .unwrap_or_default();
-        rule_files.sort();
-        for path in rule_files {
-            if let Ok(contents) = std::fs::read_to_string(&path) {
-                parts.push(contents);
-            }
-        }
-    }
+    // rules can override Claude Code's. Frontmatter decides full-vs-index —
+    // see `render_rules_dirs`.
+    parts.extend(render_rules_dirs(start));
 
     // 5. Local overrides (highest priority, typically gitignored). Check
     // both `CLAUDE.local.md` and `AGENTS.local.md`.
@@ -845,6 +913,64 @@ mod tests {
         assert!(
             out.find("prefer terse names").unwrap() < out.find("tests alongside code").unwrap()
         );
+    }
+
+    /// A rule with `alwaysApply: true` is inlined; a rule whose frontmatter
+    /// carries only a description is indexed (path + description) so the
+    /// model reads it on demand. Files without frontmatter keep the old
+    /// load-in-full behavior.
+    #[test]
+    fn rules_without_always_apply_are_indexed_not_inlined() {
+        let dir = tempdir().unwrap();
+        let rules = dir.path().join(".thclaws/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("always.md"),
+            "---\ndescription: style\nalwaysApply: true\n---\nALWAYS INLINE BODY\n",
+        )
+        .unwrap();
+        std::fs::write(
+            rules.join("lazy.md"),
+            "---\ndescription: how we do migrations\n---\nLAZY BODY SHOULD NOT APPEAR\n",
+        )
+        .unwrap();
+        std::fs::write(rules.join("legacy.md"), "LEGACY NO FRONTMATTER\n").unwrap();
+
+        let out = find_claude_md(dir.path()).unwrap();
+        assert!(out.contains("# Project rules (index)"));
+        assert!(
+            out.contains("ALWAYS INLINE BODY"),
+            "alwaysApply → full body"
+        );
+        assert!(
+            out.contains("LEGACY NO FRONTMATTER"),
+            "no frontmatter → full"
+        );
+        assert!(
+            !out.contains("LAZY BODY SHOULD NOT APPEAR"),
+            "deferred rule body must stay out of the prompt"
+        );
+        assert!(out.contains(".thclaws/rules/lazy.md"));
+        assert!(out.contains("how we do migrations"));
+        // The frontmatter block itself never reaches the prompt.
+        assert!(!out.contains("alwaysApply: true"));
+    }
+
+    /// `always_apply` (snake_case) is accepted too — frontmatter keys are
+    /// user-authored, not normalised.
+    #[test]
+    fn rules_accept_snake_case_always_apply() {
+        let dir = tempdir().unwrap();
+        let rules = dir.path().join(".claude/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("a.md"),
+            "---\nalways_apply: true\n---\nSNAKE BODY\n",
+        )
+        .unwrap();
+        let out = find_claude_md(dir.path()).unwrap();
+        assert!(out.contains("SNAKE BODY"));
+        assert!(!out.contains("# Project rules (index)"));
     }
 
     #[test]
