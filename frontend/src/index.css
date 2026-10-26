@@ -423,3 +423,35 @@ html, body, #root {
 .tab-inactive audio {
   display: none !important;
 }
+
+/* ActivityTicker — แถบสถานะวิ่งขอบล่างของแชท (ActivityTicker.tsx)
+   ข้อความที่ล้นพื้นที่วิ่งวนต่อเนื่องแบบไร้รอยต่อ: track บรรจุ 2 สำเนา
+   และเลื่อน -50% = ความกว้างของสำเนาหนึ่ง (รวม paddingRight ที่เผื่อช่องว่าง)
+   จึงวนกลับมาจุดเดิมพอดี ไม่กระตุกตอนลูป */
+@keyframes activity-ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.activity-ticker-track {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  will-change: transform;
+  animation-name: activity-ticker-scroll;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+/* หยุดวิ่งชั่วคราวเมื่อผู้ใช้ hover — อ่านข้อความยาวได้ทันที */
+.activity-ticker:hover .activity-ticker-track {
+  animation-play-state: paused;
+}
+@keyframes activity-ticker-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
+.activity-ticker-dot {
+  animation: activity-ticker-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .activity-ticker-track { animation: none; }
+}

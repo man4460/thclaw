@@ -18,9 +18,11 @@ import {
   SquareTerminal,
   SlidersHorizontal,
   ShieldCheck,
+  Brain,
 } from "lucide-react";
 import { useTheme, type ThemeMode } from "../hooks/useTheme";
 import { send, subscribe } from "../hooks/useIPC";
+import { isShowThinking, setShowThinking } from "./showThinking";
 
 type Choice =
   | "global-instructions"
@@ -135,6 +137,11 @@ export function SettingsMenu({
   // MCP is injected at startup, so toggling needs a restart to take effect.
   const [browserEnabled, setBrowserEnabled] = useState<boolean | null>(null);
   const [browserDirty, setBrowserDirty] = useState(false);
+  // แสดงบล็อก Reasoning ("▾ Thinking (N chars)") ในแชท — ค่าเริ่มต้นซ่อน
+  // เก็บใน localStorage ฝั่ง UI ล้วน ๆ (ไม่ต้องผ่าน engine, ไม่ต้องรีสตาร์ต)
+  const [showThinking, setShowThinkingState] = useState<boolean>(() =>
+    isShowThinking(),
+  );
   // Sensitive-data masking (`sensitive.enabled`, dev-plan/55). Opt-in: it
   // rewrites the prompt, so the user asks for it explicitly.
   const [sensitiveEnabled, setSensitiveEnabled] = useState<boolean | null>(
@@ -260,6 +267,17 @@ export function SettingsMenu({
   const toggleSensitive = () => {
     const next = !(sensitiveEnabled ?? false);
     send({ type: "sensitive_enabled_set", enabled: next });
+  };
+
+  // สลับการแสดง Reasoning — เขียนลง localStorage แล้ว broadcast ให้ ChatView
+  // วาดใหม่ทันทีผ่าน event เดียวกับที่ใช้ทั่วไป (ไม่ต้องโหลดหน้าใหม่)
+  const toggleShowThinking = () => {
+    const next = !showThinking;
+    setShowThinking(next);
+    setShowThinkingState(next);
+    window.dispatchEvent(
+      new CustomEvent("thclaws:show-thinking", { detail: next }),
+    );
   };
 
   // Close on click-outside (excluding the anchor so a second click on
@@ -773,6 +791,14 @@ export function SettingsMenu({
               enabled={browserEnabled}
               dirty={browserDirty}
               onToggle={toggleBrowser}
+            />
+            <FeatureFlagRow
+              icon={<Brain size={12} />}
+              label="แสดง Reasoning (Thinking)"
+              desc="บล็อก ▾ Thinking (N chars) เหนือคำตอบ — ค่าเริ่มต้นซ่อน · เก็บในเบราว์เซอร์นี้เท่านั้น ไม่ต้องรีสตาร์ต"
+              enabled={showThinking}
+              dirty={false}
+              onToggle={toggleShowThinking}
             />
             <FeatureFlagRow
               icon={<ShieldCheck size={12} />}

@@ -16,6 +16,8 @@ import { SlashCommandPopup } from "./SlashCommandPopup";
 import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
 import { matchQueuedInjections } from "./injectionQueue";
+import { ActivityTicker } from "./ActivityTicker";
+import { isShowThinking } from "./showThinking";
 
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
@@ -267,6 +269,20 @@ type Props = {
 
 export function ChatView({ active, modalOpen }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  /// ซ่อนบล็อก "Thinking (N chars)" ตามค่าเริ่มต้น — เปิดได้จาก Settings
+  /// (ดู showThinking.ts). reasoning ยังอยู่ใน state ครบ ไม่ได้ทิ้ง
+  /// รับ event `thclaws:show-thinking` จาก SettingsMenu เพื่อสลับสด ๆ
+  const [showThinking, setShowThinking] = useState<boolean>(() =>
+    isShowThinking(),
+  );
+  useEffect(() => {
+    const onToggle = (e: Event) => {
+      const detail = (e as CustomEvent<boolean>).detail;
+      setShowThinking(typeof detail === "boolean" ? detail : isShowThinking());
+    };
+    window.addEventListener("thclaws:show-thinking", onToggle);
+    return () => window.removeEventListener("thclaws:show-thinking", onToggle);
+  }, []);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [askPrompt, setAskPrompt] = useState<AskPrompt | null>(null);
@@ -1543,7 +1559,7 @@ export function ChatView({ active, modalOpen }: Props) {
                 fontSize: isSystem ? "12px" : "14px",
               }}
             >
-              {isAssistant && msg.thinking && (
+              {isAssistant && showThinking && msg.thinking && (
                 // Reasoning models (DeepSeek v4/r1, OpenAI o-series,
                 // NVIDIA NIM glm4.7, …) emit `reasoning_content` before
                 // their final answer. Show it as a dim collapsible
@@ -1698,7 +1714,7 @@ export function ChatView({ active, modalOpen }: Props) {
           </div>
         );
       }),
-    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick],
+    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking],
   );
 
   const awaitingUserAnswer = askPrompt !== null;
@@ -1815,6 +1831,9 @@ export function ChatView({ active, modalOpen }: Props) {
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* สถานะวิ่ง: บอกว่าตอนนี้ agent ทำอะไร (tool ที่รันอยู่ / บรรทัดสถานะล่าสุด) */}
+      <ActivityTicker messages={messages} streaming={streaming} />
 
       {/* Input */}
       <form
