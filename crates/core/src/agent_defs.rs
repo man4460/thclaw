@@ -268,6 +268,10 @@ impl AgentDefsConfig {
     fn seed_builtins(&mut self) {
         const BUILTINS: &[(&str, &str)] = &[
             ("dream", include_str!("default_prompts/dream.md")),
+            (
+                "codebase-scholar",
+                include_str!("default_prompts/codebase-scholar.md"),
+            ),
             ("translator", include_str!("default_prompts/translator.md")),
             ("summarizer", include_str!("default_prompts/summarizer.md")),
             ("explore", include_str!("default_prompts/explore.md")),
@@ -1018,6 +1022,19 @@ plugin-only reviewer
         assert!(!indexer.tools.iter().any(|t| t == "Write"));
         assert!(!indexer.tools.iter().any(|t| t == "Edit"));
         assert!(!indexer.tools.iter().any(|t| t == "Bash"));
+    }
+
+    #[test]
+    fn seed_builtins_includes_codebase_scholar() {
+        let config = AgentDefsConfig::load();
+        let scholar = config
+            .agents
+            .iter()
+            .find(|a| a.name == "codebase-scholar")
+            .expect("codebase-scholar built-in missing");
+        assert!(scholar.tools.iter().any(|t| t == "GitHistory"));
+        assert!(scholar.tools.iter().any(|t| t == "KmsWrite"));
+        assert!(!scholar.instructions.is_empty());
     }
 
     #[test]
