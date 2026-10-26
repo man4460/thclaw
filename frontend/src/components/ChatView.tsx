@@ -17,6 +17,7 @@ import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
 import { matchQueuedInjections } from "./injectionQueue";
 import { ActivityTicker } from "./ActivityTicker";
+import { PlanApprovalCard } from "./PlanApprovalCard";
 import { ToolRunLine, type ToolRunItem } from "./ToolRunLine";
 import { isShowThinking } from "./showThinking";
 
@@ -1883,6 +1884,9 @@ export function ChatView({ active, modalOpen }: Props) {
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* แผนรออนุมัติ → ปุ่มอยู่ตรงนี้ด้วย ไม่พึ่ง sidebar ขวาอย่างเดียว */}
+      <PlanApprovalCard />
 
       {/* สถานะวิ่ง: บอกว่าตอนนี้ agent ทำอะไร (tool ที่รันอยู่ / บรรทัดสถานะล่าสุด) */}
       <ActivityTicker messages={messages} streaming={streaming} />
