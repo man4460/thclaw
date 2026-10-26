@@ -96,6 +96,71 @@ const ALL_TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "browser", label: "Browser", icon: <Globe size={14} /> },
 ];
 
+/// แถบเมนูล่างสำหรับมือถือ — แท็บหลักย้ายลงมาให้ถึงด้วยนิ้วโป้ง
+/// (แบบเดียวกับ DashboardShell ของ aicluster: fixed, backdrop-blur,
+/// เผื่อ safe-area ของ iPhone). เดสก์ท็อปยังใช้แถวบนตามเดิม.
+function MobileTabBar({
+  tabs,
+  active,
+  onSelect,
+  onOpenSidebar,
+}: {
+  tabs: { id: Tab; label: string; icon: React.ReactNode }[];
+  active: Tab;
+  onSelect: (id: Tab) => void;
+  onOpenSidebar: () => void;
+}) {
+  return (
+    <nav
+      className="sm:hidden fixed inset-x-0 bottom-0 z-40 flex items-stretch gap-0.5 px-2 pt-1"
+      aria-label="เมนูด้านล่าง"
+      style={{
+        paddingBottom: "max(0.35rem, env(safe-area-inset-bottom, 0px))",
+        background: "color-mix(in srgb, var(--bg-secondary) 92%, transparent)",
+        borderTop: "1px solid var(--border)",
+        backdropFilter: "blur(14px)",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onOpenSidebar}
+        className="flex min-h-[3.25rem] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-xl"
+        style={{ color: "var(--text-secondary)" }}
+        aria-label="เปิดเมนูข้าง"
+      >
+        <Menu size={18} />
+        <span style={{ fontSize: "9px", lineHeight: 1.1 }}>เมนู</span>
+      </button>
+      {tabs.slice(0, 5).map((tab) => {
+        const isActive = active === tab.id;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onSelect(tab.id)}
+            className="flex min-h-[3.25rem] min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-xl px-0.5"
+            aria-current={isActive ? "page" : undefined}
+            style={{
+              color: isActive ? "var(--accent)" : "var(--text-secondary)",
+              background: isActive
+                ? "color-mix(in srgb, var(--accent) 14%, transparent)"
+                : "transparent",
+            }}
+          >
+            {tab.icon}
+            <span
+              className="max-w-full truncate px-0.5"
+              style={{ fontSize: "9px", lineHeight: 1.1 }}
+            >
+              {tab.label}
+            </span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
 // ── Startup modal ────────────────────────────────────────────────────
 // Shown before anything else. User confirms (or changes) the working
 // directory; on "Start" the backend sets cwd + re-inits sandbox, and
@@ -1150,6 +1215,14 @@ export default function App() {
           ? ("chat" as Tab)
           : activeTab;
 
+  /// เปลี่ยนแท็บ + ปิด pane ที่ค้างอยู่ (viewer/browser/graph)
+  const selectTab = useCallback((id: Tab) => {
+    setActiveTab(id);
+    setViewerTarget(null);
+    setBrowsingKms(null);
+    setGraphKms(null);
+  }, []);
+
   let TABS = teamEnabled ? ALL_TABS : ALL_TABS.filter((t) => t.id !== "team");
   if (!shellTabEnabled) TABS = TABS.filter((t) => t.id !== "shell");
   if (!browserEnabled) TABS = TABS.filter((t) => t.id !== "browser");
@@ -1273,22 +1346,14 @@ export default function App() {
           >
             {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
           </button>
-          {/* Tabs — horizontally scrollable when they don't fit (mobile);
-            labels collapse to icons below `sm`. */}
-          <div className="flex items-center overflow-x-auto no-scrollbar">
+          {/* Tabs — horizontally scrollable when they don't fit. On phones
+            the row moves to a fixed bottom bar (MobileTabBar) so the thumb
+            reaches it; `hidden sm:flex` keeps the desktop row as-is. */}
+          <div className="hidden sm:flex items-center overflow-x-auto no-scrollbar">
             {TABS.map((tab) => (
               <button
                 key={tab.id}
-                onClick={() => {
-                  setActiveTab(tab.id);
-                  // M6.39.12: switching tabs closes both the KMS viewer
-                  // pane and the KMS browser sidebar — the user is moving
-                  // back to "real work" (chat / terminal / files / team)
-                  // and the KMS browse session is implicitly done.
-                  setViewerTarget(null);
-                  setBrowsingKms(null);
-                  setGraphKms(null);
-                }}
+                onClick={() => selectTab(tab.id)}
                 className="flex items-center gap-1.5 px-3 sm:px-4 py-2.5 sm:py-2 text-xs font-medium transition-colors shrink-0"
                 style={{
                   color:
@@ -1314,7 +1379,7 @@ export default function App() {
           <RunningChip />
           <button
             onClick={() => {
-              setActiveTab("ui");
+              selectTab("ui");
               setFullscreen(true);
             }}
             className="flex items-center justify-center p-2 sm:p-1.5 mr-1 rounded hover:opacity-100 transition-opacity"
@@ -1335,7 +1400,7 @@ export default function App() {
       )}
 
       {/* Main content */}
-      <div className="flex flex-1 min-h-0">
+      <div className="flex flex-1 min-h-0 pb-[calc(3.5rem+env(safe-area-inset-bottom,0px))] sm:pb-0">
         {!fullscreen && (
           <>
             {/* Drawer backdrop (mobile only) — tap to dismiss. */}
@@ -1351,9 +1416,9 @@ export default function App() {
                 stretch to full height inside the fixed drawer. */}
             <div
               className={
-                // เก็บแล้ว: ซ่อนบนจอใหญ่ (hidden) แต่ยังเป็น drawer บนมือถือ
+                // เก็บแล้ว: ซ่อนบนจอใหญ่ (sm:hidden) แต่ยังเป็น drawer บนมือถือ
                 // (max-sm:flex) — ผู้ใช้มือถือไม่มีคอลัมน์ถาวรอยู่แล้ว
-                (sidebarCollapsed ? "hidden max-sm:flex " : "flex ") +
+                (sidebarCollapsed && !sidebarOpen ? "max-sm:flex sm:hidden " : "flex ") +
                 "z-40 max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:shadow-2xl max-sm:transition-transform " +
                 (sidebarOpen
                   ? "max-sm:translate-x-0"
@@ -1428,6 +1493,15 @@ export default function App() {
             />
           )}
         </div>
+        {/* แถบเมนูล่าง (มือถือเท่านั้น) — แท็บหลัก + เปิด sidebar */}
+        {!fullscreen && (
+          <MobileTabBar
+            tabs={TABS}
+            active={effectiveTab}
+            onSelect={selectTab}
+            onOpenSidebar={() => setSidebarOpen(true)}
+          />
+        )}
         {/* Goal-state sidebar (M6.29 Phase A). Compact 240px column
             mounted to the LEFT of the plan sidebar. Renders nothing
             when no /goal is active. Independent from plan-state — a
