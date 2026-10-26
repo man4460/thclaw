@@ -1,46 +1,36 @@
 /**
  * ToolRunLine — รวม tool call ที่ติดกันให้เหลือ "บรรทัดเดียว" ใต้หัวข้อ
  *
- * ทำอะไร: แทนที่จะแสดง tool ทุกตัวเป็นคนละบรรทัด (กำแพง บรรทัด)
- *   กลุ่มที่ติดกันจะยุบเป็น 1 บรรทัด แล้ว **สลับข้อความวิ่ง** ไปเรื่อย ๆ
- *   - ยังมีตัวรันอยู่ → หมุนเวียนแสดงทีละคำสั่ง (▸) ทุก ~1.8 วิ
- *   - เสร็จหมดแล้ว    → หยุดนิ่งที่บรรทัดสรุป `✓ n · <คำสั่งล่าสุด>`
+ * หลักการ: ในแชทแสดงแค่ "หัวข้อ + ไอคอน" ไม่แสดงคำสั่งยาว ๆ
+ * (คำสั่ง/รายละเอียดไปวิ่งอยู่ที่แถบล่าง — ActivityTicker)
+ *   - ยังรันอยู่   → `◉ กำลังทำงาน · n รายการ` (จุดกะพริบ)
+ *   - เสร็จหมดแล้ว → `✓ n รายการ`
  *
  * คลิกที่บรรทัด = กางดูรายการทั้งหมด (ยังเข้าถึงข้อมูลครบ)
- * ข้อความยาวเกิน = ตัดด้วย … (hover ดูเต็มผ่าน title)
  */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 export type ToolRunItem = {
-  /** ป้ายที่แสดง — ปกติคือ `Bash · <คำสั่ง>` */
+  /** ป้ายที่แสดงในมุมกาง — ปกติคือ `Bash · <คำสั่ง>` */
   label: string;
   done: boolean;
 };
 
 export function ToolRunLine({ items }: { items: ToolRunItem[] }) {
   const [expanded, setExpanded] = useState(false);
-  const [idx, setIdx] = useState(0);
 
   const running = items.filter((it) => !it.done);
   const anyRunning = running.length > 0;
 
-  // หมุนเวียนเฉพาะตอนยังทำงานอยู่ — เสร็จแล้วปล่อยนิ่ง ไม่กวนสายตา
-  useEffect(() => {
-    if (!anyRunning || items.length < 2) return;
-    const t = window.setInterval(
-      () => setIdx((v) => (v + 1) % items.length),
-      1800,
-    );
-    return () => window.clearInterval(t);
-  }, [anyRunning, items.length]);
-
   if (items.length === 0) return null;
 
-  const current = items[idx % items.length];
+  const label = anyRunning
+    ? items.length > 1
+      ? `กำลังทำงาน · ${running.length}/${items.length} รายการ`
+      : "กำลังทำงาน"
+    : `${items.length} รายการ`;
 
-  const label = anyRunning ? current.label : `${items.length} รายการ`;
-
-  const glyph = anyRunning ? "▸" : "✓";
+  const glyph = anyRunning ? "◉" : "✓";
 
   return (
     <div className="flex justify-start">

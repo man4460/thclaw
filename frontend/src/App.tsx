@@ -52,7 +52,7 @@ import { MessengerConnectModal } from "./components/MessengerConnectModal";
 import { SettingsMenu } from "./components/SettingsMenu";
 import { InstructionsEditorModal } from "./components/InstructionsEditorModal";
 import { SecretsBackendDialog } from "./components/SecretsBackendDialog";
-import { ApprovalModal } from "./components/ApprovalModal";
+import { ApprovalPill } from "./components/ApprovalCard";
 import { ScheduleAddModal } from "./components/ScheduleAddModal";
 import { AgentEditorModal } from "./components/AgentEditorModal";
 import { MarketplaceModal } from "./components/MarketplaceModal";
@@ -1152,7 +1152,7 @@ export default function App() {
             setStarted(true);
           }}
         />
-        <ApprovalModal />
+        <ApprovalPill />
       </>
     );
   }
@@ -1167,7 +1167,7 @@ export default function App() {
         <SecretsBackendDialog
           onPicked={(choice) => setSecretsBackend(choice)}
         />
-        <ApprovalModal />
+        <ApprovalPill />
       </>
     );
   }
@@ -1532,7 +1532,7 @@ export default function App() {
           onClose={closeInstructions}
         />
       )}
-      <ApprovalModal />
+      <ApprovalPill show={renderTab !== "chat"} />
       <ScheduleAddModal />
       <AgentEditorModal />
       <MarketplaceModal />

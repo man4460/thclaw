@@ -18,6 +18,7 @@ import { McpAppIframe } from "./McpAppIframe";
 import { matchQueuedInjections } from "./injectionQueue";
 import { ActivityTicker } from "./ActivityTicker";
 import { PlanApprovalCard } from "./PlanApprovalCard";
+import { ApprovalCard } from "./ApprovalCard";
 import { ToolRunLine, type ToolRunItem } from "./ToolRunLine";
 import { isShowThinking } from "./showThinking";
 
@@ -107,6 +108,80 @@ type TodoItemInput = {
   content: string;
   status: "pending" | "in_progress" | "completed";
 };
+
+/// การ์ด todo ในแชท — ยุบเหลือบรรทัดเดียว (สรุป) กดกางดูทั้งหมด
+///
+/// เดิมแสดงทุกรายการเป็นการ์ดมีขอบทุกครั้งที่ model เรียก TodoWrite
+/// ทำให้แชทเต็มไปด้วย "แถวดำ ๆ" ซ้ำกับ TodoSidebar (ที่แสดงรายการเต็ม
+/// อยู่แล้ว) — ตอนนี้เหลือบรรทัดสรุปที่บอกความคืบหน้า + งานที่กำลังทำ
+function TodoSummary({ todos }: { todos: TodoItemInput[] }) {
+  const [open, setOpen] = useState(false);
+  const done = todos.filter((t) => t.status === "completed").length;
+  const active = todos.find((t) => t.status === "in_progress");
+  const label = active
+    ? `${done}/${todos.length} · ${active.content}`
+    : `${done}/${todos.length} เสร็จแล้ว`;
+
+  return (
+    <div className="mt-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-1.5 text-xs text-left"
+        title={label}
+        style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+      >
+        <span
+          className={active ? "activity-ticker-dot" : undefined}
+          style={{
+            flexShrink: 0,
+            width: 5,
+            height: 5,
+            borderRadius: "50%",
+            background: active ? "var(--warning, #d4a657)" : "transparent",
+            border: active ? "none" : "1px solid var(--text-secondary)",
+            display: "inline-block",
+          }}
+        />
+        <span className="truncate">☑ {label}</span>
+        <span style={{ opacity: 0.5, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div
+          className="ml-3 mt-0.5 flex flex-col gap-0.5"
+          style={{ fontSize: "11px", lineHeight: "1.5" }}
+        >
+          {todos.map((t) => {
+            const glyph =
+              t.status === "completed" ? "✓" : t.status === "in_progress" ? "◉" : "☐";
+            const color =
+              t.status === "completed"
+                ? "var(--success, #6cc070)"
+                : t.status === "in_progress"
+                  ? "var(--warning, #d4a657)"
+                  : "var(--text-secondary)";
+            return (
+              <span key={t.id} className="truncate" title={t.content}>
+                <span style={{ color }}>{glyph}</span>{" "}
+                <span
+                  style={{
+                    textDecoration: t.status === "completed" ? "line-through" : "none",
+                    color:
+                      t.status === "pending"
+                        ? "var(--text-secondary)"
+                        : "var(--text-primary)",
+                  }}
+                >
+                  {t.content}
+                </span>
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /// One pasted/dropped image waiting to be sent with the next chat
 /// message. `data` is base64 of the raw bytes (no `data:` prefix —
@@ -1486,66 +1561,7 @@ export function ChatView({ active, modalOpen }: Props) {
                   />
                 </div>
                 {todos && todos.length > 0 && (
-                  <div
-                    className="mt-1 rounded border px-2 py-1.5"
-                    style={{
-                      borderColor: "var(--border, #2a2a2a)",
-                      background: "var(--surface-1, rgba(255,255,255,0.03))",
-                      fontFamily:
-                        "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-                    }}
-                  >
-                    {todos.map((t) => {
-                      const glyphForStatus =
-                        t.status === "completed"
-                          ? "✓"
-                          : t.status === "in_progress"
-                            ? "◉"
-                            : "☐";
-                      const colorForStatus =
-                        t.status === "completed"
-                          ? "var(--success, #6cc070)"
-                          : t.status === "in_progress"
-                            ? "var(--warning, #d4a657)"
-                            : "var(--text-secondary)";
-                      return (
-                        <div
-                          key={t.id}
-                          className="flex items-baseline gap-2"
-                          style={{
-                            fontSize: "11px",
-                            lineHeight: "1.5",
-                          }}
-                        >
-                          <span
-                            style={{
-                              color: colorForStatus,
-                              fontFamily:
-                                "Menlo, Monaco, 'Courier New', monospace",
-                              fontSize: "11px",
-                            }}
-                          >
-                            {glyphForStatus}
-                          </span>
-                          <span
-                            style={{
-                              textDecoration:
-                                t.status === "completed"
-                                  ? "line-through"
-                                  : "none",
-                              color:
-                                t.status === "pending"
-                                  ? "var(--text-secondary)"
-                                  : "var(--text-primary)",
-                              wordBreak: "break-word",
-                            }}
-                          >
-                            {t.content}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  <TodoSummary todos={todos} />
                 )}
                 {widget && msg.toolDone && (
                   <McpAppIframe
@@ -1884,6 +1900,9 @@ export function ChatView({ active, modalOpen }: Props) {
         )}
         <div ref={bottomRef} />
       </div>
+
+      {/* คำขออนุญาต (tool ที่ต้องอนุมัติ) → การ์ดพร้อมปุ่มในแชทเสมอ */}
+      <ApprovalCard />
 
       {/* แผนรออนุมัติ → ปุ่มอยู่ตรงนี้ด้วย ไม่พึ่ง sidebar ขวาอย่างเดียว */}
       <PlanApprovalCard />

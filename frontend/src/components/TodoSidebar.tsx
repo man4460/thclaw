@@ -50,6 +50,19 @@ export function TodoSidebar() {
   /// from mount; live envelopes patch in whenever they arrive.
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [dismissed, setDismissed] = useState(false);
+  /// หน้าต่างแคบ → ยุบเป็นราง 20px อัตโนมัติ. sidebar นี้กิน 240px
+  /// จากคอลัมน์แชท และรายการเต็มแสดงในแชทอยู่แล้ว (TodoSummary)
+  /// จึงไม่ต้องแบกพื้นที่ทั้งสองที่บนจอเล็ก
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < 1180,
+  );
+  /// ผู้ใช้กดเปิดเองบนจอแคบ → เคารพการตัดสินใจนั้นจนกว่าจะปิดเอง
+  const [forcedOpen, setForcedOpen] = useState(false);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 1180);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [confirmClear, setConfirmClear] = useState(false);
 
   useEffect(() => {
@@ -83,11 +96,14 @@ export function TodoSidebar() {
   if (todos.length === 0) return null;
 
   // Collapsed: chevron tab on the right edge re-opens.
-  if (dismissed) {
+  if (dismissed || (narrow && !forcedOpen)) {
     return (
       <button
         type="button"
-        onClick={() => setDismissed(false)}
+        onClick={() => {
+          setDismissed(false);
+          setForcedOpen(true);
+        }}
         className="flex items-center justify-center shrink-0 border-l"
         style={{
           width: "20px",
@@ -109,7 +125,7 @@ export function TodoSidebar() {
     <div
       className="flex flex-col shrink-0 border-l"
       style={{
-        width: "260px",
+        width: "240px",
         background: "var(--bg-secondary)",
         borderColor: "var(--border)",
       }}

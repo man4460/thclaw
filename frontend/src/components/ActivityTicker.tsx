@@ -1,13 +1,13 @@
 /**
  * ActivityTicker — แถบสถานะวิ่งที่ขอบล่างของหน้าแชท
  *
- * ทำอะไร: บอก "ตอนนี้ agent กำลังทำอะไร" เป็นบรรทัดเดียว
- *   - มี tool รันอยู่  → `▸ Bash · <คำสั่ง>` (อ่านจาก toolInput.command)
- *   - กำลังพิมพ์ข้อความ → บรรทัดสุดท้ายของข้อความ assistant (สถานะที่ agent ประกาศ)
- *   - ทำทั้งสองพร้อมกันได้ → `สถานะ  ›  ▸ Bash · …`
+ * หลักการ: ในแชทไม่ต้องมีบรรทัดคำสั่งยาว ๆ (อันนั้นถูกยุบเป็น
+ * "หัวข้อ + ไอคอน" ด้วย ToolRunLine) — รายละเอียดทั้งหมดมาอยู่ที่นี่
+ * เป็นบรรทัดเดียวที่ **สลับ** ให้เห็นทีละรายการ:
  *
- * ข้อความยาวเกินพื้นที่ → วิ่งวน (marquee) ต่อเนื่อง ตามที่ผู้ใช้ขอ
- * ("แสดงด้านล่างวิ่งตลอด") ไม่ต้อง hover ไม่ต้องคลิก
+ *   - มี tool รันหลายตัว → สลับ `▸ Bash · <คำสั่ง>` ของแต่ละตัว (~3 วิ)
+ *   - มีสถานะจากข้อความ assistant → สลับคั่นระหว่างสถานะกับคำสั่ง
+ *   - ข้อความยาวเกินพื้นที่ → วิ่งวน (marquee) ต่อเนื่อง
  *
  * ไม่แสดงเมื่อไม่มีอะไรเกิดขึ้น — แถบเปล่าจะกินพื้นที่ฟรี
  */
@@ -30,6 +30,22 @@ function describeTool(msg: TickerMessage): string {
   const name = msg.toolName ?? msg.content;
   if (inp && typeof inp === "object") {
     const rec = inp as Record<string, unknown>;
+    // TodoWrite / SubmitPlan: เอาเนื้อหาที่มีความหมาย ไม่ใช่ JSON ดิบ
+    if (Array.isArray(rec.todos)) {
+      const items = rec.todos as Array<{ content?: unknown; status?: unknown }>;
+      const active = items.find((t) => t.status === "in_progress") ?? items[0];
+      if (active && typeof active.content === "string") {
+        return `${name} · ${active.content.replace(/\s+/g, " ").trim()}`;
+      }
+    }
+    if (Array.isArray(rec.steps)) {
+      const steps = rec.steps as Array<{ title?: unknown; status?: unknown }>;
+      const active = steps.find((s) => s.status === "in_progress") ?? steps[0];
+      if (active && typeof active.title === "string") {
+        return `${name} · ${active.title.replace(/\s+/g, " ").trim()}`;
+      }
+      return `${name} · ${steps.length} ขั้น`;
+    }
     if (typeof rec.command === "string" && rec.command.trim() !== "") {
       return `${name} · ${rec.command.replace(/\s+/g, " ").trim()}`;
     }
@@ -56,6 +72,18 @@ function lastStatusLine(messages: TickerMessage[]): string {
   return "";
 }
 
+/** ข้อความที่สลับวน — สถานะล่าสุดก่อน แล้วตามด้วยคำสั่งที่รันอยู่ */
+function tickerItems(
+  messages: TickerMessage[],
+  running: TickerMessage[],
+): string[] {
+  const items: string[] = [];
+  const status = lastStatusLine(messages);
+  if (status) items.push(status);
+  for (const m of running) items.push(`▸ ${describeTool(m)}`);
+  return items;
+}
+
 export function ActivityTicker({
   messages,
   streaming,
@@ -67,16 +95,27 @@ export function ActivityTicker({
     () => messages.filter((m) => m.role === "tool" && !m.toolDone),
     [messages],
   );
+  const items = useMemo(
+    () => tickerItems(messages, running),
+    [messages, running],
+  );
+  const itemsKey = items.join("\u0000");
 
-  const text = useMemo(() => {
-    const status = lastStatusLine(messages);
-    const tool =
-      running.length > 0 ? describeTool(running[running.length - 1]) : "";
-    if (tool && status) return `${status}   ›   ▸ ${tool}`;
-    if (tool) return `▸ ${tool}`;
-    if (status) return status;
-    return "";
-  }, [messages, running]);
+  // สลับรายการเมื่อมีมากกว่า 1 — เห็นทั้งสถานะและคำสั่งครบโดยไม่ต้องกวาดตา
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    if (items.length < 2) return;
+    const t = window.setInterval(
+      () => setIdx((v) => (v + 1) % items.length),
+      3000,
+    );
+    return () => window.clearInterval(t);
+    // itemsKey ทำให้ interval รีเซ็ตเมื่อชุดรายการเปลี่ยน (ไม่ใช่ทุก render)
+  }, [items.length, itemsKey]);
+
+  // ไม่เก็บ idx ที่ "หมดอายุ" — หารเอาเศษเสมอ (รายการหดตัวก็ไม่ค้าง)
+  const shownIdx = items.length === 0 ? 0 : idx % items.length;
+  const text = items.length === 0 ? "" : items[shownIdx];
 
   // ตรวจว่าข้อความล้นพื้นที่ไหม → ถ้าล้น ให้วิ่ง
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -117,7 +156,7 @@ export function ActivityTicker({
       title={text}
     >
       <span
-        className={streaming ? "activity-ticker-dot" : undefined}
+        className={streaming || running.length > 0 ? "activity-ticker-dot" : undefined}
         style={{
           flexShrink: 0,
           width: 6,
@@ -127,6 +166,12 @@ export function ActivityTicker({
           opacity: running.length > 0 ? 1 : 0.5,
         }}
       />
+      {/* จุดบอกว่ามีรายการให้สลับกี่รายการ — ช่วยให้รู้ว่าไม่ได้ค้าง */}
+      {items.length > 1 && (
+        <span style={{ flexShrink: 0, opacity: 0.55, fontSize: "10px" }}>
+          {shownIdx + 1}/{items.length}
+        </span>
+      )}
       <div ref={wrapRef} className="flex-1 overflow-hidden" style={{ whiteSpace: "nowrap" }}>
         {/* ตัววัดความกว้างจริง (ไม่แสดง) — ใช้คำนวณว่าต้องวิ่งหรือไม่ */}
         <span
