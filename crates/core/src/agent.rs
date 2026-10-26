@@ -1528,6 +1528,13 @@ impl Agent {
             for iteration in 0..effective_max {
                 yield AgentEvent::IterationStart { iteration };
 
+                // Tool definitions are re-sent on every request and are
+                // the largest fixed cost after history (measured ~25K
+                // tokens for the full built-in catalog + MCP). Compute
+                // them once here so the compaction budget can reserve the
+                // real size instead of a guess.
+                let tool_defs = tools.tool_defs();
+
                 let messages = {
                     let h = history.lock().expect("history lock");
                     // M6.18 BUG H1: subtract the system-prompt size + a
@@ -1540,12 +1547,16 @@ impl Agent {
                     // had "fitted" the messages. The provider then
                     // 400'd with "context length exceeded."
                     //
-                    // We reserve 4 KiB for tool definitions (typical
-                    // catalog of ~30-40 builtins + MCP tools) on top
-                    // of the system-prompt deduction — rough but keeps
-                    // the request comfortably inside the window.
+                    // Reserve the *actual* tool-definition token cost
+                    // (name + description + JSON schema, re-sent every
+                    // request) rather than a hardcoded guess. The old
+                    // `1024` was ~25x under the real catalog size, so a
+                    // small-context model could still overflow after
+                    // compaction had "fitted" history to the window.
                     let system_tokens = crate::tokens::estimate_tokens(&system);
-                    let tools_reserve_tokens = 1024;
+                    let tools_reserve_tokens = crate::tokens::estimate_tokens(
+                        &serde_json::to_string(&tool_defs).unwrap_or_default(),
+                    );
                     let notes_tokens = turn_notes.lock().expect("turn_notes lock").tokens();
                     // `auto_compact_ratio` shrinks the *effective* window
                     // before anything else is subtracted, so both the
@@ -1620,7 +1631,6 @@ impl Agent {
                         .attach(&mut compacted);
                     compacted
                 };
-                let tool_defs = tools.tool_defs();
 
                 // Read the override slot fresh every iteration. When a
                 // SkillTool invocation between iterations writes a
