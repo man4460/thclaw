@@ -17,6 +17,7 @@ import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
 import { matchQueuedInjections } from "./injectionQueue";
 import { ActivityTicker } from "./ActivityTicker";
+import { ToolRunLine, type ToolRunItem } from "./ToolRunLine";
 import { isShowThinking } from "./showThinking";
 
 type ChatMessage = {
@@ -1348,6 +1349,41 @@ export function ChatView({ active, modalOpen }: Props) {
     el.style.overflowY = sh > maxHeight ? "auto" : "hidden";
   }, [input]);
 
+  // ยุบ tool call ที่ติดกันให้เหลือบรรทัดเดียว (ToolRunLine) — หน้าต่างแชท
+  // ไม่ต้องกลายเป็นกำแพงบรรทัดคำสั่ง หัวข้อ (ข้อความ assistant) ยังคั่นแต่ละช่วง
+  // ตามเดิม. TodoWrite / MCP widget ไม่ยุบ เพราะมี card ของตัวเอง.
+  const toolRuns = useMemo(() => {
+    const starts = new Map<number, ToolRunItem[]>();
+    const skip = new Set<number>();
+    let cur: ToolRunItem[] = [];
+    let start = -1;
+    const flush = () => {
+      if (cur.length > 0) {
+        starts.set(start, cur);
+        for (let k = start + 1; k < start + cur.length; k++) skip.add(k);
+      }
+      cur = [];
+      start = -1;
+    };
+    messages.forEach((m, i) => {
+      const plain =
+        m.role === "tool" &&
+        !m.uiResource &&
+        !(m.toolKind === "TodoWrite" && m.toolInput);
+      if (!plain) {
+        flush();
+        return;
+      }
+      if (start < 0) start = i;
+      cur.push({
+        label: m.toolName ?? m.content,
+        done: m.toolDone === true,
+      });
+    });
+    flush();
+    return { starts, skip };
+  }, [messages]);
+
   const messageElements = useMemo(
     () =>
       messages.map((msg, i) => {
@@ -1380,6 +1416,11 @@ export function ChatView({ active, modalOpen }: Props) {
             />
           );
         }
+        // กลุ่ม tool ที่ติดกัน → 1 บรรทัดวิ่งสลับ (ดู toolRuns ด้านบน)
+        if (toolRuns.skip.has(i)) return null;
+        const run = toolRuns.starts.get(i);
+        if (run) return <ToolRunLine key={i} items={run} />;
+
         if (msg.role === "tool") {
           const glyph = msg.toolDone ? "✓" : "▸";
           const copied = copiedMessageIndex === i;
@@ -1714,7 +1755,7 @@ export function ChatView({ active, modalOpen }: Props) {
           </div>
         );
       }),
-    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking],
+    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking, toolRuns],
   );
 
   const awaitingUserAnswer = askPrompt !== null;
