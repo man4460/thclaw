@@ -34,6 +34,10 @@ config.json
 .env.local
 .thclaws/
 
+# Local scratch / runtime uploads
+tmp/
+_uploads/
+
 # Local-only agent guidance (kept out of the public repo)
 CLAUDE.md
 
