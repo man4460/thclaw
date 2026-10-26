@@ -21,6 +21,8 @@ import {
   Menu,
   ArrowUp,
   Home,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
@@ -1062,6 +1064,27 @@ export default function App() {
   // breakpoint (toggled by the hamburger in the tab bar). On `sm:`+ it's
   // the normal inline column, so this flag is ignored there.
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  /// ซ่อน sidebar ซ้ายบนจอใหญ่ (desktop) เพื่อคืนพื้นที่ให้แชท.
+  /// เก็บใน localStorage — ผู้ใช้ที่ทำงานจอเดียวจะไม่ต้องกดซ้ำทุกครั้งที่เปิดแอป.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("thclaws.ui.sidebarCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed((v) => {
+      const next = !v;
+      try {
+        if (next) localStorage.setItem("thclaws.ui.sidebarCollapsed", "1");
+        else localStorage.removeItem("thclaws.ui.sidebarCollapsed");
+      } catch {
+        // private mode — ค่าไม่คงอยู่ข้ามการเปิดแอป แต่ยังใช้ได้ในเซสชันนี้
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     const unsub = subscribe((msg) => {
@@ -1235,6 +1258,21 @@ export default function App() {
           >
             <Menu size={18} />
           </button>
+          {/* Desktop: hide/show the left column so the chat gets full width.
+              Mobile keeps the drawer above. */}
+          <button
+            onClick={toggleSidebarCollapsed}
+            className="hidden sm:flex items-center justify-center p-2 shrink-0 hover:opacity-100"
+            title={
+              sidebarCollapsed ? "แสดงแถบด้านซ้าย" : "ซ่อนแถบด้านซ้าย (ขยายแชท)"
+            }
+            aria-label={
+              sidebarCollapsed ? "Show left sidebar" : "Hide left sidebar"
+            }
+            style={{ color: "var(--text-secondary)", opacity: 0.75 }}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={16} />}
+          </button>
           {/* Tabs — horizontally scrollable when they don't fit (mobile);
             labels collapse to icons below `sm`. */}
           <div className="flex items-center overflow-x-auto no-scrollbar">
@@ -1313,7 +1351,10 @@ export default function App() {
                 stretch to full height inside the fixed drawer. */}
             <div
               className={
-                "flex z-40 max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:shadow-2xl max-sm:transition-transform " +
+                // เก็บแล้ว: ซ่อนบนจอใหญ่ (hidden) แต่ยังเป็น drawer บนมือถือ
+                // (max-sm:flex) — ผู้ใช้มือถือไม่มีคอลัมน์ถาวรอยู่แล้ว
+                (sidebarCollapsed ? "hidden max-sm:flex " : "flex ") +
+                "z-40 max-sm:fixed max-sm:inset-y-0 max-sm:left-0 max-sm:shadow-2xl max-sm:transition-transform " +
                 (sidebarOpen
                   ? "max-sm:translate-x-0"
                   : "max-sm:-translate-x-full")
