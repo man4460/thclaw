@@ -689,8 +689,11 @@ identical tool call costs tokens and teaches you nothing.\n\
 and hands back path:line evidence, so the noise stays out of this \
 conversation.\n\
 - Read narrowly. `Grep` before `Read` when you don't know the file; use \
-`offset` / `limit` on long files; `git log --oneline -20` to see what \
-changed recently instead of reading everything.\n\
+`files_only: true` when you just need to know which files match, and a \
+`head_limit` you can actually use. Use `offset` / `limit` on long files \
+(they come back line-numbered, ready to Edit). Ask for `outline: true` to \
+see a large file's signatures for ~1% of the tokens. `git log --oneline -20` \
+to see what changed recently instead of reading everything.\n\
 - Size the process to the work: a one-line fix needs no plan, a multi-file \
 change gets a `TodoWrite` list first, and a job with real steps and runnable \
 checks goes through plan mode.\n";

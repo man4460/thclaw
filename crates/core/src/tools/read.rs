@@ -171,6 +171,14 @@ fn outline_matcher(ext: &str) -> Option<&'static [&'static str]> {
 /// and past this point the map costs more than it saves.
 const OUTLINE_MAX_ITEMS: usize = 300;
 
+/// A whole-file read past either limit is answered with the outline plus a
+/// pointer to offset/limit instead of the body. 2 000 lines (or 200 KiB) is
+/// well past any file a model can usefully hold in one gulp, and those
+/// tokens would otherwise ride in every subsequent request until
+/// compaction. Generous enough that ordinary source files still read whole.
+const WHOLE_FILE_LINES: usize = 2_000;
+const WHOLE_FILE_BYTES: usize = 200 * 1024;
+
 /// Structural outline of a source file: one line per item signature with
 /// its line number. This is the "repo map" primitive at file granularity —
 /// a model can see where things live for ~1% of the tokens of the body and
@@ -400,7 +408,8 @@ impl Tool for ReadTool {
          an Edit can target an exact line; pass `line_numbers: false` to disable. \
          Pass `outline: true` on a source file to get just its top-level \
          signatures with line numbers (a cheap map of a large file) instead of \
-         the body. \
+         the body. Source files over 2 000 lines answer a whole-file read with \
+         that outline automatically — slice them with offset/limit. \
          Image files (.png/.jpg/.jpeg/.webp/.gif) are returned as inline \
          multimodal content so vision-capable models (Claude, etc.) can \
          see the pixels — the model receives the image alongside a text \
@@ -479,6 +488,19 @@ impl Tool for ReadTool {
         }
 
         if offset == 0 && limit.is_none() {
+            // Whole-file read of something huge: hand back the map, not the
+            // body. Only for extensions the outline understands — a 3 000-line
+            // .md or .txt has no signatures, so it still reads whole.
+            if contents.lines().count() > WHOLE_FILE_LINES || contents.len() > WHOLE_FILE_BYTES {
+                if let Ok(outline) = outline_of(&path, &contents) {
+                    return Ok(format!(
+                        "{outline}\n[{} is too large to read whole — this is its structural \
+                         outline. Read the ranges you need with `offset` + `limit`; every \
+                         slice comes back with line numbers, so an Edit can target it exactly.]",
+                        path.display()
+                    ));
+                }
+            }
             return Ok(contents);
         }
 
@@ -590,6 +612,68 @@ impl Tool for ReadTool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A source file past the whole-file ceiling answers with the outline,
+    /// not 2 500 lines of body — and still points at offset/limit.
+    #[tokio::test]
+    async fn huge_source_file_returns_outline_not_body() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        let mut body = String::new();
+        for n in 0..700 {
+            body.push_str(&format!("pub fn f{n}() {{\n    let x = {n};\n}}\n"));
+        }
+        assert!(body.lines().count() > WHOLE_FILE_LINES);
+        std::fs::write(&path, &body).unwrap();
+
+        let out = ReadTool
+            .call(json!({"path": path.to_string_lossy()}))
+            .await
+            .unwrap();
+        assert!(out.contains("too large to read whole"), "got: {out}");
+        assert!(out.contains("pub fn f0()"), "outline should list items");
+        assert!(!out.contains("let x = 0;"), "body must not be inlined");
+    }
+
+    /// An explicit slice still works on the same file — the guard only
+    /// intercepts whole-file reads.
+    #[tokio::test]
+    async fn huge_source_file_slice_is_still_readable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("big.rs");
+        let mut body = String::new();
+        for n in 0..300 {
+            body.push_str(&format!("pub fn f{n}() {{\n    let x = {n};\n}}\n"));
+        }
+        std::fs::write(&path, &body).unwrap();
+
+        let out = ReadTool
+            .call(json!({"path": path.to_string_lossy(), "offset": 1, "limit": 2}))
+            .await
+            .unwrap();
+        assert!(out.contains("pub fn f0()"), "got: {out}");
+        assert!(
+            out.starts_with("1\t"),
+            "slice reads are line-numbered: {out}"
+        );
+    }
+
+    /// Small files are untouched — no outline, full body, no line prefixes.
+    #[tokio::test]
+    async fn small_source_file_still_reads_whole() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("small.rs");
+        std::fs::write(&path, "pub fn a() {}\npub fn b() {}\n").unwrap();
+        let out = ReadTool
+            .call(json!({"path": path.to_string_lossy()}))
+            .await
+            .unwrap();
+        assert!(out.contains("pub fn a()") && out.contains("pub fn b()"));
+        assert!(
+            !out.starts_with("1\t"),
+            "whole reads stay unprefixed: {out}"
+        );
+    }
 
     #[tokio::test]
     async fn office_documents_name_the_tool_that_reads_them() {
