@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
-import { Check, Copy, Paperclip } from "lucide-react";
+import { Check, Copy, Paperclip, Loader2, MessageSquare, Zap } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
 import { useBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
@@ -21,6 +21,27 @@ import { PlanApprovalCard } from "./PlanApprovalCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { ChatTaskList } from "./ChatTaskList";
 import { isShowThinking } from "./showThinking";
+
+/// ข้อความ assistant แบบ "บรรทัดสถานะ" (สิ่งที่กำลังทำ) เทียบกับ "คำตอบ"
+///
+/// ตัวจำแนกแบบ heuristic ที่ไม่ต้องให้ engine ติดธง: บรรทัดเดียวสั้น ๆ
+/// ไม่มีโครงสร้าง markdown และ **ไม่ใช่ข้อความสุดท้าย** ของบทสนทนา
+/// → เป็นสถานะที่ agent ประกาศระหว่างทำงาน (คำตอบจริงมักยาว/มีหัวข้อ
+/// และจบเทิร์น) ใช้เลือกไอคอน + การจัดวางที่ต่างกันเท่านั้น
+function isStatusLine(
+  content: string,
+  isAssistant: boolean,
+  isLast: boolean,
+): boolean {
+  if (!isAssistant) return false;
+  if (isLast) return false;
+  const t = content.trim();
+  if (t === "" || t.length > 120) return false;
+  if (t.includes("\n")) return false;
+  // โครงสร้าง markdown = คำตอบ ไม่ใช่สถานะ
+  if (/^[#>*|`-]|^\d+\.|\*\*|\[.*\]\(/.test(t)) return false;
+  return true;
+}
 
 type ChatMessage = {
   role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
@@ -1460,13 +1481,40 @@ export function ChatView({ active, modalOpen }: Props) {
         // possible) keep the standard `space-y-3` spacing.
         const needsTurnGap =
           msg.role === "user" && i > 0 && messages[i - 1]?.role !== "user";
+        // สถานะ (สิ่งที่กำลังทำ) vs คำตอบ: ไอคอน + การจัดวางต่างกัน
+        const statusLine = isStatusLine(msg.content, isAssistant, i === messages.length - 1);
         return (
           <div
             key={i}
-            className={`flex ${msg.role === "user" ? "justify-end" : isSystem || isError ? "justify-center" : "justify-start"}${needsTurnGap ? " pt-4" : ""}`}
+            className={`flex ${msg.role === "user" ? "justify-end" : isSystem || isError ? "justify-center" : "justify-start"}${needsTurnGap ? " pt-3" : ""}`}
           >
+            {isAssistant && (
+              <span
+                style={{
+                  flexShrink: 0,
+                  display: "inline-flex",
+                  alignItems: "flex-start",
+                  paddingTop: 4,
+                  marginRight: 6,
+                  opacity: statusLine ? 0.55 : 0.85,
+                }}
+                title={statusLine ? "กำลังทำ" : "คำตอบ"}
+              >
+                {statusLine ? (
+                  streaming ? (
+                    <Loader2 size={12} className="task-spin" style={{ color: "var(--accent)" }} />
+                  ) : (
+                    <Zap size={12} style={{ color: "var(--text-secondary)" }} />
+                  )
+                ) : (
+                  <MessageSquare size={12} style={{ color: "var(--accent)" }} />
+                )}
+              </span>
+            )}
             <div
-              className={`group relative max-w-[92%] sm:max-w-[80%] rounded-lg py-2 pl-3 pr-9 text-sm ${isAssistant ? "" : "whitespace-pre-wrap"}`}
+              className={`group relative max-w-[92%] sm:max-w-[80%] rounded-lg text-sm ${isAssistant ? "" : "whitespace-pre-wrap"} ${
+                statusLine ? "py-0.5 pl-0 pr-8" : "py-2 pl-3 pr-9"
+              }`}
               style={{
                 background:
                   msg.role === "user"
@@ -1475,7 +1523,9 @@ export function ChatView({ active, modalOpen }: Props) {
                       ? "color-mix(in srgb, #f85149 12%, transparent)"
                       : isSystem
                         ? "transparent"
-                        : "var(--bg-secondary)",
+                        : statusLine
+                          ? "transparent"
+                          : "var(--bg-secondary)",
                 color:
                   msg.role === "user"
                     ? "var(--chat-user-fg)"
@@ -1492,7 +1542,8 @@ export function ChatView({ active, modalOpen }: Props) {
                 fontFamily: isSystem
                   ? "Menlo, Monaco, 'Courier New', monospace"
                   : "inherit",
-                fontSize: isSystem ? "12px" : "14px",
+                fontSize: isSystem ? "12px" : statusLine ? "13px" : "14px",
+                ...(statusLine ? { color: "var(--text-secondary)" } : {}),
               }}
             >
               {isAssistant && showThinking && msg.thinking && (
@@ -1650,7 +1701,14 @@ export function ChatView({ active, modalOpen }: Props) {
           </div>
         );
       }),
-    [messages, copiedMessageIndex, copyMessage, handleChatLinkClick, showThinking],
+    [
+      messages,
+      copiedMessageIndex,
+      copyMessage,
+      handleChatLinkClick,
+      showThinking,
+      streaming,
+    ],
   );
 
   const awaitingUserAnswer = askPrompt !== null;
@@ -1685,7 +1743,7 @@ export function ChatView({ active, modalOpen }: Props) {
       {/* Messages */}
       <div
         ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto p-4 space-y-3"
+        className="flex-1 overflow-y-auto p-4 space-y-1.5"
         style={{ background: "var(--bg-primary)" }}
         onScroll={() => {
           const el = messagesContainerRef.current;

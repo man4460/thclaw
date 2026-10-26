@@ -99,9 +99,13 @@ export function ActivityTicker({
     () => tickerItems(messages, running),
     [messages, running],
   );
-  const itemsKey = items.join("\u0000");
 
   // สลับรายการเมื่อมีมากกว่า 1 — เห็นทั้งสถานะและคำสั่งครบโดยไม่ต้องกวาดตา
+  //
+  // บั๊กเดิม: effect ผูกกับ `itemsKey` ซึ่งเปลี่ยนทุกครั้งที่ streaming มาถึง
+  // (ทุก token) → interval ถูกล้าง+ตั้งใหม่ตลอด จึงไม่เคยครบ 3 วิ แล้วไม่สลับเลย
+  // ตอนนี้ผูกกับ "จำนวนรายการ" เท่านั้น — เนื้อหาเปลี่ยนแต่จำนวนเท่าเดิม
+  // จะไม่รีสตาร์ทตัวจับเวลา
   const [idx, setIdx] = useState(0);
   useEffect(() => {
     if (items.length < 2) return;
@@ -110,8 +114,7 @@ export function ActivityTicker({
       3000,
     );
     return () => window.clearInterval(t);
-    // itemsKey ทำให้ interval รีเซ็ตเมื่อชุดรายการเปลี่ยน (ไม่ใช่ทุก render)
-  }, [items.length, itemsKey]);
+  }, [items.length]);
 
   // ไม่เก็บ idx ที่ "หมดอายุ" — หารเอาเศษเสมอ (รายการหดตัวก็ไม่ค้าง)
   const shownIdx = items.length === 0 ? 0 : idx % items.length;
