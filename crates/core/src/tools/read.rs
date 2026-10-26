@@ -69,6 +69,173 @@ fn document_reader_hint(path: &std::path::Path) -> Option<String> {
     })
 }
 
+/// Prefix every line with its 1-indexed number (`12\ttext`). Tab-separated
+/// and unpadded on purpose: one token per line, no alignment whitespace to
+/// pay for on every read.
+fn with_line_numbers(text: &str, first_line: usize) -> String {
+    if text.is_empty() {
+        return String::new(); // no phantom number on an empty slice
+    }
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&(first_line + i).to_string());
+        out.push('\t');
+        out.push_str(line);
+    }
+    out
+}
+
+/// Signatures that mark a top-level item, per language family. Matching is
+/// on the trimmed line prefix; indentation decides whether the item is
+/// nested (an `fn` inside an `impl`) and nested items are kept — they are
+/// exactly what a caller hunting for a method needs.
+fn outline_matcher(ext: &str) -> Option<&'static [&'static str]> {
+    Some(match ext {
+        "rs" => &[
+            "fn ",
+            "pub fn ",
+            "pub async fn ",
+            "async fn ",
+            "struct ",
+            "pub struct ",
+            "enum ",
+            "pub enum ",
+            "trait ",
+            "pub trait ",
+            "impl ",
+            "impl<",
+            "mod ",
+            "pub mod ",
+            "const ",
+            "pub const ",
+            "static ",
+            "type ",
+            "pub type ",
+            "macro_rules!",
+        ],
+        "py" => &["def ", "async def ", "class "],
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" => &[
+            "export function ",
+            "export async function ",
+            "export default function ",
+            "export default class ",
+            "function ",
+            "export class ",
+            "class ",
+            "export interface ",
+            "interface ",
+            "export type ",
+            "type ",
+            "export const ",
+            "export enum ",
+            "enum ",
+            "const ",
+        ],
+        "go" => &["func ", "type ", "var ", "const "],
+        "java" | "kt" | "swift" | "cs" => &[
+            "class ",
+            "public class ",
+            "interface ",
+            "enum ",
+            "struct ",
+            "protocol ",
+            "extension ",
+            "fun ",
+            "func ",
+        ],
+        "c" | "h" | "cpp" | "cc" | "hpp" | "m" | "mm" => &[
+            "#include",
+            "typedef ",
+            "struct ",
+            "class ",
+            "namespace ",
+            "static ",
+        ],
+        "rb" => &["def ", "class ", "module "],
+        "php" => &[
+            "function ",
+            "class ",
+            "public function ",
+            "private function ",
+            "protected function ",
+        ],
+        "sql" => &["create ", "CREATE ", "alter ", "ALTER "],
+        _ => return None,
+    })
+}
+
+/// Cap on outline entries — a 5k-line file can have hundreds of `const`s,
+/// and past this point the map costs more than it saves.
+const OUTLINE_MAX_ITEMS: usize = 300;
+
+/// Structural outline of a source file: one line per item signature with
+/// its line number. This is the "repo map" primitive at file granularity —
+/// a model can see where things live for ~1% of the tokens of the body and
+/// then read (or edit) the exact range.
+fn outline_of(path: &std::path::Path, contents: &str) -> Result<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let Some(markers) = outline_matcher(&ext) else {
+        return Err(Error::Tool(format!(
+            "outline is not supported for {} — no signature syntax known for '.{ext}'. \
+             Read the file normally (use offset/limit for a large one).",
+            path.display()
+        )));
+    };
+
+    let mut out = String::new();
+    let mut total = 0usize;
+    let mut shown = 0usize;
+    for (i, raw) in contents.lines().enumerate() {
+        let trimmed = raw.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if !markers.iter().any(|m| trimmed.starts_with(m)) {
+            continue;
+        }
+        total += 1;
+        if shown >= OUTLINE_MAX_ITEMS {
+            continue;
+        }
+        shown += 1;
+        // Keep one level of nesting visible (methods under an impl) with
+        // a two-space indent, and drop the body of long signatures.
+        let indent = raw.len() - trimmed.len();
+        let marker = if indent > 0 { "  " } else { "" };
+        let sig: String = trimmed.chars().take(120).collect();
+        out.push_str(&format!("{}\t{marker}{sig}\n", i + 1));
+    }
+
+    if out.is_empty() {
+        return Err(Error::Tool(format!(
+            "no {} signatures found in {} ({} lines). Read the file instead.",
+            ext,
+            path.display(),
+            contents.lines().count()
+        )));
+    }
+    let mut header = format!(
+        "{} ({} lines) — {} item(s){}:\n",
+        path.display(),
+        contents.lines().count(),
+        total,
+        if total > shown {
+            format!(", first {shown} shown")
+        } else {
+            String::new()
+        }
+    );
+    header.push_str(&out);
+    Ok(header)
+}
+
 fn sniff_document(path: &std::path::Path) -> Option<&'static str> {
     use std::io::Read as _;
     let mut head = [0u8; 8];
@@ -229,6 +396,11 @@ impl Tool for ReadTool {
     fn description(&self) -> &'static str {
         "Read the contents of a file. Optional `offset` (1-indexed line) and `limit` \
          (max lines) select a slice; omit for the whole file. \
+         Slice reads are prefixed with line numbers (`12\\ttext`) by default so \
+         an Edit can target an exact line; pass `line_numbers: false` to disable. \
+         Pass `outline: true` on a source file to get just its top-level \
+         signatures with line numbers (a cheap map of a large file) instead of \
+         the body. \
          Image files (.png/.jpg/.jpeg/.webp/.gif) are returned as inline \
          multimodal content so vision-capable models (Claude, etc.) can \
          see the pixels — the model receives the image alongside a text \
@@ -243,7 +415,9 @@ impl Tool for ReadTool {
             "properties": {
                 "path": {"type": "string", "description": "Absolute path to the file"},
                 "offset": {"type": "integer", "description": "Start line (1-indexed) — text files only"},
-                "limit":  {"type": "integer", "description": "Max number of lines — text files only"}
+                "limit":  {"type": "integer", "description": "Max number of lines — text files only"},
+                "line_numbers": {"type": "boolean", "description": "Prefix each line with its 1-indexed number. Default true for slice reads (offset/limit), false for a whole-file read."},
+                "outline": {"type": "boolean", "description": "Return only top-level item signatures (fn/struct/class/impl/…) with line numbers — use this to map a large source file before reading the interesting part."}
             },
             "required": ["path"]
         })
@@ -296,6 +470,14 @@ impl Tool for ReadTool {
         let contents = std::fs::read_to_string(&path)
             .map_err(|e| Error::Tool(format!("read {}: {e}", path.display())))?;
 
+        if input
+            .get("outline")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return outline_of(&path, &contents);
+        }
+
         if offset == 0 && limit.is_none() {
             return Ok(contents);
         }
@@ -306,7 +488,20 @@ impl Tool for ReadTool {
             .map(|l| start.saturating_add(l))
             .unwrap_or(lines.len())
             .min(lines.len());
-        Ok(lines[start..end].join("\n"))
+        let slice = lines[start..end].join("\n");
+        // Line numbers are on by default for slices: the caller asked for
+        // a *slice*, so it needs to know which lines it got to edit them
+        // precisely. Whole-file reads stay unprefixed (nothing to anchor
+        // on, and the prefix is ~10-15% of the payload).
+        let numbered = input
+            .get("line_numbers")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        Ok(if numbered {
+            with_line_numbers(&slice, start + 1)
+        } else {
+            slice
+        })
     }
 
     /// Override the multimodal entry point so an image file returns an
@@ -472,7 +667,60 @@ mod tests {
             }))
             .await
             .unwrap();
+        assert_eq!(out, "2\tb\n3\tc");
+    }
+
+    #[tokio::test]
+    async fn slice_line_numbers_can_be_disabled() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("many.txt");
+        std::fs::write(&path, "a\nb\nc\n").unwrap();
+
+        let out = ReadTool
+            .call(json!({
+                "path": path.to_string_lossy(),
+                "offset": 2,
+                "line_numbers": false
+            }))
+            .await
+            .unwrap();
         assert_eq!(out, "b\nc");
+    }
+
+    #[tokio::test]
+    async fn outline_lists_signatures_with_line_numbers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lib.rs");
+        std::fs::write(
+            &path,
+            "use std::fmt;\n\npub struct Foo {\n    a: u8,\n}\n\nimpl Foo {\n    pub fn new() -> Self {\n        Foo { a: 0 }\n    }\n}\n\nfn helper() {}\n",
+        )
+        .unwrap();
+
+        let out = ReadTool
+            .call(json!({"path": path.to_string_lossy(), "outline": true}))
+            .await
+            .unwrap();
+        assert!(out.contains("pub struct Foo"), "{out}");
+        assert!(out.contains("impl Foo"), "{out}");
+        assert!(out.contains("pub fn new()"), "{out}");
+        assert!(out.contains("fn helper()"), "{out}");
+        // Line numbers, not bodies.
+        assert!(out.contains("3\tpub struct Foo"), "{out}");
+        assert!(out.contains("13\tfn helper()"), "{out}");
+        assert!(!out.contains("Foo { a: 0 }"), "body leaked: {out}");
+    }
+
+    #[tokio::test]
+    async fn outline_rejects_unknown_language() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("notes.xyz");
+        std::fs::write(&path, "hello\n").unwrap();
+        let err = ReadTool
+            .call(json!({"path": path.to_string_lossy(), "outline": true}))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("not supported"), "{err}");
     }
 
     #[tokio::test]

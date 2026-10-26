@@ -139,6 +139,26 @@ pub async fn dispatch(
                 progress_bar(pct, 24),
                 pct,
             );
+            // Which tools ate the history. Cheap to fix once visible —
+            // a dominating Read means "use offset/limit or outline: true",
+            // a dominating Bash means "narrow the command's output".
+            let rows = crate::compaction::tool_token_breakdown(&history);
+            if rows.iter().any(|(n, _)| n != "(other)") {
+                out.push_str("\nhistory breakdown (est.):");
+                for (name, tokens) in rows.iter().take(6) {
+                    let share = if history_tokens > 0 {
+                        (*tokens as f64 / history_tokens as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    out.push_str(&format!(
+                        "\n  {:<18} {:>8}  {:>5.1}%",
+                        name,
+                        format_tokens(*tokens),
+                        share,
+                    ));
+                }
+            }
             if !claude_files.is_empty() || mem_index_bytes > 0 || !mem_entries.is_empty() {
                 out.push_str("\nsystem-prompt breakdown:");
                 if !claude_files.is_empty() {

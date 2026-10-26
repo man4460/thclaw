@@ -71,6 +71,55 @@ pub fn estimate_messages_tokens(messages: &[Message]) -> usize {
     messages.iter().map(estimate_message_tokens).sum()
 }
 
+/// Where the history tokens actually went, per tool: `(tool_name, tokens)`
+/// sorted biggest-first. `ToolUse` input counts against the tool that was
+/// called (that's what the model paid to emit the call) and each
+/// `ToolResult` is attributed through its `tool_use_id`, so a `Bash` that
+/// dumped 40 KB and a `Read` that pulled a whole file show up separately.
+/// Blocks we can't attribute (text, thinking, orphan results) are folded
+/// into `"(other)"` so the column always sums to the history total.
+pub fn tool_token_breakdown(messages: &[Message]) -> Vec<(String, usize)> {
+    use std::collections::HashMap;
+
+    let mut names: HashMap<&str, &str> = HashMap::new();
+    let mut totals: HashMap<String, usize> = HashMap::new();
+    let mut other = 0usize;
+
+    for m in messages {
+        for block in &m.content {
+            match block {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
+                    names.insert(id.as_str(), name.as_str());
+                    *totals.entry(name.clone()).or_default() += estimate_tokens(&input.to_string());
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } => {
+                    let cost = estimate_tokens(&content.to_text());
+                    match names.get(tool_use_id.as_str()) {
+                        Some(name) => *totals.entry((*name).to_string()).or_default() += cost,
+                        None => other += cost,
+                    }
+                }
+                ContentBlock::Text { text } => other += estimate_tokens(text),
+                ContentBlock::Thinking { content, .. } => other += estimate_tokens(content),
+                ContentBlock::Image { .. } => other += 258,
+            }
+        }
+    }
+
+    if other > 0 {
+        totals.insert("(other)".to_string(), other);
+    }
+    let mut rows: Vec<(String, usize)> = totals.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows
+}
+
 /// Fast synchronous compaction: drop oldest messages until under budget.
 /// Preserves tool_use/tool_result pairs — never splits a tool call from its
 /// result, as that would confuse the provider.
@@ -573,6 +622,54 @@ mod tests {
             ],
         };
         assert_eq!(estimate_message_tokens(&m), 4);
+    }
+
+    #[test]
+    fn tool_token_breakdown_attributes_results_to_their_tool() {
+        let messages = vec![
+            text_msg(Role::User, "go"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".into(),
+                        name: "Bash".into(),
+                        input: serde_json::json!({"command": "ls"}),
+                        thought_signature: None,
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".into(),
+                        name: "Read".into(),
+                        input: serde_json::json!({"path": "a.rs"}),
+                        thought_signature: None,
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t1".into(),
+                        content: "a".repeat(4000).into(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t2".into(),
+                        content: "b".repeat(400).into(),
+                        is_error: false,
+                    },
+                ],
+            },
+        ];
+
+        let rows = tool_token_breakdown(&messages);
+        let bash = rows.iter().find(|(n, _)| n == "Bash").map(|(_, t)| *t);
+        let read = rows.iter().find(|(n, _)| n == "Read").map(|(_, t)| *t);
+        assert!(bash.unwrap() > read.unwrap(), "{rows:?}");
+        // Bash result is ~10x Read's, and the biggest row comes first.
+        assert_eq!(rows[0].0, "Bash", "{rows:?}");
+        // Unattributable text (user "go") is folded, never dropped.
+        assert!(rows.iter().any(|(n, _)| n == "(other)"), "{rows:?}");
     }
 
     #[test]

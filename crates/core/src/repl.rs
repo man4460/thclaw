@@ -8959,6 +8959,27 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                         crate::util::progress_bar(pct, 24),
                         pct,
                     );
+                    // Where the history tokens actually went. A tool whose
+                    // results dominate is the cheapest thing to fix (narrow
+                    // the call, read a slice instead of the whole file);
+                    // without this column the bloat is invisible.
+                    let rows = crate::compaction::tool_token_breakdown(&history);
+                    if !rows.is_empty() {
+                        println!("{COLOR_DIM}history breakdown (est.):{COLOR_RESET}");
+                        for (name, tokens) in rows.iter().take(6) {
+                            let share = if history_tokens > 0 {
+                                (*tokens as f64 / history_tokens as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            println!(
+                                "{COLOR_DIM}  {:<18} {:>8}  {:>5.1}%{COLOR_RESET}",
+                                name,
+                                crate::util::format_tokens(*tokens),
+                                share,
+                            );
+                        }
+                    }
                     if !claude_files.is_empty() || mem_index_bytes > 0 || !mem_entries.is_empty() {
                         println!("{COLOR_DIM}system-prompt breakdown:{COLOR_RESET}");
                         if !claude_files.is_empty() {

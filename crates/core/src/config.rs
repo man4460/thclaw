@@ -77,6 +77,18 @@ pub struct AppConfig {
     /// Anthropic extended-thinking token budget. `None` or 0 → disabled.
     pub thinking_budget: Option<u32>,
 
+    /// Opt-in early auto-compaction: compact the history once it passes
+    /// this fraction of the messages budget, instead of waiting until the
+    /// request is about to overflow the model's window. `None` (default)
+    /// keeps the old behaviour — compact only when over budget — so a
+    /// long single turn can still send a near-full request. Setting e.g.
+    /// `0.7` trades a little history for steadier latency and a much
+    /// smaller worst-case request (cheaper, less prone to provider
+    /// 400s on models whose real window is smaller than the catalogue
+    /// claims). Clamped to `0.3..=0.95`.
+    #[serde(default, alias = "autoCompactRatio")]
+    pub auto_compact_ratio: Option<f32>,
+
     /// Per-chunk idle timeout (seconds) applied to every streaming
     /// provider's `byte_stream.next()` await. If the provider goes
     /// silent for this long mid-stream the response is aborted with
@@ -148,12 +160,14 @@ pub struct AppConfig {
 
     /// How installed skills are surfaced to the model (dev-plan/06 P2).
     /// Trade-offs between system-prompt token cost and discoverability.
-    /// - `"full"` (default): every skill listed with name + description
-    ///   + when_to_use trigger. Highest token cost; highest "model
+    /// - `"names-only"` (default): list only skill names + a hint to
+    ///   call the Skill / SkillSearch tools for detail. Constant
+    ///   per-skill cost (~30 chars vs ~200) so 100 skills add ~3KB
+    ///   instead of ~20KB — and the catalog is re-sent every turn, so
+    ///   this is the token-cheap default.
+    /// - `"full"`: every skill listed with name + description +
+    ///   when_to_use trigger. Highest token cost; highest "model
     ///   always knows" coverage. Right for users with ≤20 skills.
-    /// - `"names-only"`: list only skill names + a hint to call the
-    ///   Skill / SkillSearch tools for detail. Constant per-skill cost
-    ///   (~30 chars vs ~200) so 100 skills add ~3KB instead of ~20KB.
     /// - `"discover-tool-only"`: no skill names listed at all; system
     ///   prompt only mentions the SkillList / SkillSearch tools.
     ///   Constant-size prompt regardless of skill count. Risks model
@@ -685,6 +699,7 @@ impl Default for AppConfig {
             // 10K thinking budget suits the "design a small component"
             // class of task without burning budget on trivial edits.
             thinking_budget: None,
+            auto_compact_ratio: None,
             stream_chunk_timeout_secs: default_stream_chunk_timeout_secs(),
             search_engine: "auto".to_string(),
             allowed_tools: None,
@@ -702,10 +717,14 @@ impl Default for AppConfig {
             // M6.2 compact-between-steps is the safe default. M6.4
             // opt-in `clear` requires explicit project config.
             plan_context_strategy: "compact".to_string(),
-            // dev-plan/06 P2: "full" is the safe default — preserves
-            // pre-P2 behavior. Power users with many skills can opt
-            // into "names-only" or "discover-tool-only".
-            skills_listing_strategy: "full".to_string(),
+            // "names-only" is the default here: the skill catalog is
+            // re-sent in the system prompt on every request, so listing
+            // every description + trigger costs tokens on every single
+            // turn. Names + the "call SkillSearch/SkillList first" hint
+            // keeps discovery working for ~1/6 the cost. Users with a
+            // small catalog who want the descriptions inline can set
+            // `skills_listing_strategy: "full"`.
+            skills_listing_strategy: "names-only".to_string(),
             mcp_servers: Vec::new(),
             kms_active: Vec::new(),
             auto_learn: false,
@@ -837,8 +856,9 @@ pub struct ProjectConfig {
     #[serde(rename = "planContextStrategy")]
     pub plan_context_strategy: Option<String>,
     /// dev-plan/06 P2: how installed skills are surfaced in the
-    /// system prompt. Accepts `"full"` (default), `"names-only"`,
-    /// `"discover-tool-only"`. Anything else falls back to `"full"`.
+    /// system prompt. Accepts `"names-only"` (default), `"full"`,
+    /// `"discover-tool-only"`. Anything else falls back to the
+    /// default.
     #[serde(rename = "skillsListingStrategy")]
     pub skills_listing_strategy: Option<String>,
     /// Per-skill model override for the built-in `extract-and-save`
@@ -869,6 +889,9 @@ pub struct ProjectConfig {
     pub research_thinking: Option<String>,
     #[serde(rename = "thinkingBudget")]
     pub thinking_budget: Option<u32>,
+    /// See `AppConfig::auto_compact_ratio`.
+    #[serde(rename = "autoCompactRatio", alias = "auto_compact_ratio")]
+    pub auto_compact_ratio: Option<f32>,
     #[serde(rename = "searchEngine")]
     pub search_engine: Option<String>,
     /// Tool names allowed (flat list, thClaws native format).
@@ -1105,6 +1128,7 @@ impl Default for ProjectConfig {
             research_language: None,
             research_thinking: None,
             thinking_budget: None,
+            auto_compact_ratio: None,
             search_engine: None,
             allowed_tools: None,
             disallowed_tools: None,
@@ -1804,7 +1828,8 @@ impl ProjectConfig {
         }
         if let Some(ref s) = self.skills_listing_strategy {
             // Same merge-boundary validation as plan_context_strategy.
-            // Unknown values silently fall back to the default ("full").
+            // Unknown values silently fall back to the default (now
+            // "names-only" — see AppConfig::default).
             match s.as_str() {
                 "full" | "names-only" | "discover-tool-only" => {
                     config.skills_listing_strategy = s.clone()
@@ -1814,6 +1839,12 @@ impl ProjectConfig {
         }
         if let Some(b) = self.thinking_budget {
             config.thinking_budget = Some(b);
+        }
+        if let Some(r) = self.auto_compact_ratio {
+            // Clamp rather than reject: a value below 0.3 would compact on
+            // nearly every turn (history mostly gone), above 0.95 barely
+            // moves the trigger off the overflow point.
+            config.auto_compact_ratio = Some(r.clamp(0.3, 0.95));
         }
         if let Some(ref s) = self.search_engine {
             config.search_engine = s.clone();
@@ -2928,6 +2959,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_compact_ratio_is_clamped_on_merge() {
+        // A too-eager ratio would compact almost every turn; a too-late one
+        // barely moves the trigger. The merge clamps instead of rejecting so
+        // a typo'd setting still does something sensible.
+        for (input, want) in [(0.05f32, 0.3f32), (0.99, 0.95), (0.7, 0.7)] {
+            let mut cfg = AppConfig::default();
+            let p = ProjectConfig {
+                auto_compact_ratio: Some(input),
+                ..Default::default()
+            };
+            p.apply_to(&mut cfg);
+            assert_eq!(cfg.auto_compact_ratio, Some(want), "input {input}");
+        }
+        // Unset leaves the field alone (classic overflow-only compaction).
+        let mut cfg = AppConfig::default();
+        ProjectConfig::default().apply_to(&mut cfg);
+        assert_eq!(cfg.auto_compact_ratio, None);
+    }
+
     #[test]
     fn command_candidates_cover_windows_executables() {
         let win = command_candidates("pdftotext", true, Some(".COM;.EXE;.BAT;.CMD"));

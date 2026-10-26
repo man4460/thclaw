@@ -1511,6 +1511,15 @@ impl Agent {
             let mut recent_reads: Vec<String> = Vec::new();
             const RECENT_READS_CAP: usize = 6;
 
+            // Opt-in early compaction (settings `autoCompactRatio`). Read
+            // once per turn — the settings file is small but this is the
+            // hot path. `None` = classic behaviour (compact only when the
+            // request would overflow).
+            let compact_ratio = crate::config::AppConfig::load()
+                .ok()
+                .and_then(|c| c.auto_compact_ratio)
+                .map(|r| r.clamp(0.3, 0.95));
+
             // 0 means unlimited.
             let effective_max = if max_iterations == 0 { usize::MAX } else { max_iterations };
             // Prototype: thinking is a session-wide setting, but a browse is
@@ -1538,6 +1547,15 @@ impl Agent {
                     let system_tokens = crate::tokens::estimate_tokens(&system);
                     let tools_reserve_tokens = 1024;
                     let notes_tokens = turn_notes.lock().expect("turn_notes lock").tokens();
+                    // `auto_compact_ratio` shrinks the *effective* window
+                    // before anything else is subtracted, so both the
+                    // history budget and the `/context` warning line move
+                    // together (the percentage keeps meaning "of what we're
+                    // willing to send").
+                    let budget_tokens = match compact_ratio {
+                        Some(r) => ((budget_tokens as f32) * r) as usize,
+                        None => budget_tokens,
+                    };
                     let messages_budget = budget_tokens
                         .saturating_sub(system_tokens)
                         .saturating_sub(tools_reserve_tokens)

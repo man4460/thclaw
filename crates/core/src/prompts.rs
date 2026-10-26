@@ -1043,8 +1043,12 @@ mod tests {
                 p.contains("# Available skills"),
                 "{surface_name} prompt must include skill catalog when store has entries",
             );
+            // Rendering differs by `skills_listing_strategy`: "full"
+            // bolds the name (`**demo**`), "names-only" (the default)
+            // emits a plain comma-separated list. Both must contain the
+            // name — that's the contract this pins.
             assert!(
-                p.contains("**demo**"),
+                p.contains("demo"),
                 "{surface_name} prompt must list the `demo` skill name",
             );
         }
