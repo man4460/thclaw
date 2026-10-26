@@ -36,7 +36,6 @@ import { useTheme } from "./hooks/useTheme";
 import { Sidebar } from "./components/Sidebar";
 import { PlanSidebar } from "./components/PlanSidebar";
 import { GoalSidebar } from "./components/GoalSidebar";
-import { TodoSidebar } from "./components/TodoSidebar";
 import { ResearchSidebar } from "./components/ResearchSidebar";
 import { BackgroundAgentsSidebar } from "./components/BackgroundAgentsSidebar";
 import {
@@ -1394,12 +1393,6 @@ export default function App() {
             when no /goal is active. Independent from plan-state — a
             session can carry both, one, or neither. */}
         <GoalSidebar />
-        {/* Todo-list sidebar. Mirrors PlanSidebar's right-edge layout
-            but displays the `TodoWrite` scratchpad; its one action is
-            Clear. Hidden while the list is empty; the engine re-sends
-            `.thclaws/state/todos.md` on every `frontend_ready` so
-            reopening a project shows the prior list immediately. */}
-        <TodoSidebar />
         {/* Plan-mode sidebar (M1). Renders nothing when no plan is
             active — plan_state's broadcaster fires `chat_plan_update`
             with `null` to clear it on `/new` / `/load` of a plan-less

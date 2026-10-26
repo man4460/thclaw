@@ -455,3 +455,14 @@ html, body, #root {
 @media (prefers-reduced-motion: reduce) {
   .activity-ticker-track { animation: none; }
 }
+
+/* ChatTaskList — ไอคอนหมุนสำหรับงานที่กำลังทำ (Loader2) */
+@keyframes task-spin-rotate {
+  to { transform: rotate(360deg); }
+}
+.task-spin {
+  animation: task-spin-rotate 1s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-spin { animation: none; }
+}
