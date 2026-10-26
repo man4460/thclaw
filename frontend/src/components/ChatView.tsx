@@ -1357,15 +1357,25 @@ export function ChatView({ active, modalOpen }: Props) {
     const skip = new Set<number>();
     let cur: ToolRunItem[] = [];
     let start = -1;
+    let indices: number[] = [];
     const flush = () => {
       if (cur.length > 0) {
         starts.set(start, cur);
-        for (let k = start + 1; k < start + cur.length; k++) skip.add(k);
+        for (const k of indices.slice(1)) skip.add(k);
       }
       cur = [];
+      indices = [];
       start = -1;
     };
     messages.forEach((m, i) => {
+      // ข้อความที่วาดไม่ออก (assistant ว่าง / system ว่าง) ไม่ควรตัดกลุ่ม
+      // — engine แทรกข้อความเปล่าระหว่าง tool call ได้ มองเห็นเป็นบรรทัด
+      // ติดกัน แต่ถ้านับเป็นตัวคั่น กลุ่มจะถูกตัดทุกลูก ไม่ยุบเลย
+      const invisible =
+        (m.role === "assistant" && m.content.trim() === "" &&
+          !(showThinking && m.thinking)) ||
+        (m.role === "system" && m.content.trim() === "");
+      if (invisible) return;
       const plain =
         m.role === "tool" &&
         !m.uiResource &&
@@ -1375,6 +1385,7 @@ export function ChatView({ active, modalOpen }: Props) {
         return;
       }
       if (start < 0) start = i;
+      indices.push(i);
       cur.push({
         label: m.toolName ?? m.content,
         done: m.toolDone === true,
@@ -1382,7 +1393,7 @@ export function ChatView({ active, modalOpen }: Props) {
     });
     flush();
     return { starts, skip };
-  }, [messages]);
+  }, [messages, showThinking]);
 
   const messageElements = useMemo(
     () =>

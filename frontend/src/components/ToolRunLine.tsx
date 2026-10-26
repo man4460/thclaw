@@ -37,11 +37,8 @@ export function ToolRunLine({ items }: { items: ToolRunItem[] }) {
   if (items.length === 0) return null;
 
   const current = items[idx % items.length];
-  const last = items[items.length - 1];
 
-  const label = anyRunning
-    ? current.label
-    : `${items.length} รายการ · ${last.label}`;
+  const label = anyRunning ? current.label : `${items.length} รายการ`;
 
   const glyph = anyRunning ? "▸" : "✓";
 
