@@ -2610,6 +2610,16 @@ pub fn sanitize_alias(raw: &str) -> String {
 /// Empty string when no active KMS or when active names resolve to
 /// nothing.
 pub fn system_prompt_section(active: &[String]) -> String {
+    system_prompt_section_for(active, false)
+}
+
+/// Render the KMS block for a session, knowing whether automatic retrieval is
+/// on. An **active** (pinned) base gets its full index, as before. Under auto
+/// mode every other base with pages contributes one catalog line — name and
+/// what it is about — so the model knows it may `KmsSearch` there without the
+/// prompt carrying every base's table of contents on every turn. A base with
+/// no pages is left out: there is nothing to search and nothing to say.
+pub fn system_prompt_section_for(active: &[String], auto: bool) -> String {
     let mut parts = Vec::new();
     let mut traits = VaultTraits::default();
     for name in active {
@@ -2629,6 +2639,49 @@ pub fn system_prompt_section(active: &[String]) -> String {
         traits.raw_layer |= t.raw_layer;
         block.push_str(&format!("\n{header}\n"));
         parts.push(block);
+    }
+    if auto {
+        let mut rows: Vec<(String, String, usize)> = Vec::new();
+        for kref in crate::kms::list_all() {
+            if active.iter().any(|a| a == &kref.name) {
+                continue;
+            }
+            let pages = std::fs::read_dir(kref.pages_dir())
+                .map(|d| d.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "md")).count())
+                .unwrap_or(0);
+            if pages == 0 {
+                continue;
+            }
+            // The entry page's summary is the base's own one-line statement
+            // of what it covers — better than anything derived from a name.
+            let about = entry_page(&kref)
+                .and_then(|entry| {
+                    scan_index_entries(&kref)
+                        .into_iter()
+                        .find(|e| e.stem == entry)
+                        .map(|e| strip_wikilink_syntax(e.summary.trim()))
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_default();
+            rows.push((kref.name.clone(), about, pages));
+        }
+        if !rows.is_empty() {
+            rows.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut cat = String::from(
+                "\n## Other knowledge bases available (search with `KmsSearch`)\n\n\
+                 These bases exist and are searched automatically for each message, but only \
+                 their catalog line is in this prompt. Reach for `KmsSearch(kms: \"<name>\", \
+                 query: \"...\")` when a question touches one of them.\n\n",
+            );
+            for (name, about, pages) in rows {
+                if about.is_empty() {
+                    cat.push_str(&format!("- `{name}` ({pages} pages)\n"));
+                } else {
+                    cat.push_str(&format!("- `{name}` ({pages} pages) — {about}\n"));
+                }
+            }
+            parts.insert(0, cat);
+        }
     }
     if parts.is_empty() {
         return String::new();
@@ -9307,6 +9360,25 @@ mod tests {
     fn system_prompt_section_empty_when_no_active() {
         let _home = scoped_home();
         assert_eq!(system_prompt_section(&[]), "");
+    }
+
+    /// Auto mode must not pay for every base's index. Unpinned bases are
+    /// advertised as one catalog line each, and a base with no pages is not
+    /// advertised at all — there is nothing there to search.
+    #[test]
+    fn auto_mode_catalog_lists_unpinned_bases_and_skips_empty_ones() {
+        let _home = scoped_home();
+        let kb = create("kb", KmsScope::Project).unwrap();
+        std::fs::write(kb.pages_dir().join("leave.md"), "# ลา\n\nลาพักผ่อนได้ 15 วัน\n").unwrap();
+        create("empty-base", KmsScope::Project).unwrap();
+
+        let on = system_prompt_section_for(&[], true);
+        assert!(on.contains("`kb`"), "{on}");
+        assert!(!on.contains("empty-base"), "empty base advertised: {on}");
+        assert!(on.contains("KmsSearch"), "{on}");
+
+        // Off is exactly the old behaviour: nothing pinned, nothing said.
+        assert_eq!(system_prompt_section_for(&[], false), "");
     }
 
     /// The prompt announces a base; it does not list it.

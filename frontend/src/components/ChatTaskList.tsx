@@ -5,14 +5,22 @@
  * model เรียก TodoWrite → แชทยาวขึ้นเรื่อย ๆ และซ้ำกับ sidebar. ตอนนี้:
  *   - รายการเดียว ปักนิ่งเหนือช่องพิมพ์ (ไม่เลื่อนหายไปกับประวัติ)
  *   - ข้อที่กำลังทำ → ไอคอนหมุน (Loader2) · เสร็จแล้ว → เครื่องหมายถูก
- *   - รายละเอียดคำสั่งไม่มาอยู่ที่นี่ — ไปสลับแสดงที่แถบล่าง (ActivityTicker)
+ *   - รายละเอียดคำสั่งไม่มาอยู่ที่นี่ — ไปกางดูที่แผง ActivityLog เหนือช่องพิมพ์
  *
  * ข้อมูลมาจาก IPC: `chat_todo_update` (TodoWrite) และ `chat_plan_update`
  * (plan mode). ถ้ามีทั้งคู่ ให้ todo มาก่อน เพราะเป็นงานที่ลงมือทำจริง
  */
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Circle, Loader2, ListChecks, ChevronDown } from "lucide-react";
+import {
+  CheckCircle2,
+  Circle,
+  Loader2,
+  Pause,
+  ListChecks,
+  ChevronDown,
+} from "lucide-react";
 import { subscribe } from "../hooks/useIPC";
+import { useBusyState } from "../hooks/useBusyState";
 
 type TaskStatus = "pending" | "in_progress" | "done" | "failed" | "completed";
 
@@ -64,6 +72,10 @@ export function ChatTaskList() {
   const [mode, setMode] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
+  // "Engine กำลังทำงานอยู่จริงไหม" — ไอคอนหมุนต้องมาจากสถานะนี้ ไม่ใช่จาก
+  // `in_progress` ที่ค้างอยู่ในไฟล์. เดิม todo ที่ไม่ได้ปิดท้ายเทิร์นจะหมุน
+  // ค้างตลอดกาล ทำให้อ่านว่า "ยังทำงานอยู่" ทั้งที่จบไปแล้ว
+  const { busy } = useBusyState();
 
   useEffect(
     () =>
@@ -99,8 +111,10 @@ export function ChatTaskList() {
   if (tasks.length === 0 || dismissed) return null;
 
   const done = tasks.filter((t) => t.status === "completed" || t.status === "done").length;
-  const active = tasks.find((t) => t.status === "in_progress");
-  const visible = expanded ? tasks : tasks.slice(0, MAX_VISIBLE);
+  const allDone = done === tasks.length;
+  const active = busy ? tasks.find((t) => t.status === "in_progress") : undefined;
+  // ทุกข้อเสร็จแล้ว → ยุบเหลือบรรทัดเดียว (ยังกดขยายดูได้) ไม่กินที่เหนือช่องพิมพ์
+  const visible = allDone && !expanded ? [] : expanded ? tasks : tasks.slice(0, MAX_VISIBLE);
   const hidden = tasks.length - visible.length;
 
   return (
@@ -117,6 +131,9 @@ export function ChatTaskList() {
         <span style={{ color: "var(--text-secondary)" }}>
           {done}/{tasks.length}
         </span>
+        {allDone && !expanded && (
+          <span style={{ color: "var(--success, #6cc070)" }}>เสร็จครบ</span>
+        )}
         {active && (
           <span className="truncate" style={{ color: "var(--text-primary)" }} title={active.text}>
             · {shortLabel(active.text)}
@@ -136,7 +153,7 @@ export function ChatTaskList() {
               fontSize: "10px",
             }}
           >
-            {expanded ? "ย่อ" : `+${hidden}`}
+            {expanded ? "ย่อ" : allDone ? "ดู" : `+${hidden}`}
             <ChevronDown
               size={11}
               style={{ transform: expanded ? "rotate(180deg)" : "none" }}
@@ -165,13 +182,16 @@ export function ChatTaskList() {
       <div className="mt-0.5 flex flex-col" style={{ gap: 1 }}>
         {visible.map((t) => {
           const finished = t.status === "completed" || t.status === "done";
-          const running = t.status === "in_progress";
+          // หมุนเฉพาะตอน engine ทำงานจริง — `in_progress` ที่ค้างหลังจบเทิร์น
+          // แสดงเป็น "หยุด" (ไอคอน pause จาง ๆ) ไม่หลอกว่ายังวิ่งอยู่
+          const running = t.status === "in_progress" && busy;
+          const stalled = t.status === "in_progress" && !busy;
           return (
             <div
               key={t.id}
               className="flex items-center gap-1.5"
               style={{ fontSize: "11px", lineHeight: "1.5" }}
-              title={t.text}
+              title={stalled ? `${t.text} — หยุดกลางคัน (ไม่ได้กำลังทำอยู่)` : t.text}
             >
               <span style={{ flexShrink: 0, display: "inline-flex", width: 12 }}>
                 {finished ? (
@@ -181,6 +201,11 @@ export function ChatTaskList() {
                     size={11}
                     className="task-spin"
                     style={{ color: "var(--accent, #5fb3b3)" }}
+                  />
+                ) : stalled ? (
+                  <Pause
+                    size={10}
+                    style={{ color: "var(--text-secondary)", opacity: 0.8 }}
                   />
                 ) : (
                   <Circle size={11} style={{ color: "var(--text-secondary)", opacity: 0.6 }} />

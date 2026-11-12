@@ -278,7 +278,7 @@ impl Provider for OllamaProvider {
         let body = Self::build_body(&req);
         let url = format!("{}/api/chat", self.base_url.trim_end_matches('/'));
 
-        let resp = self
+        let mut resp = self
             .client
             .post(&url)
             .header("content-type", "application/json")
@@ -290,7 +290,33 @@ impl Provider for OllamaProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(Error::Provider(format!("http {status}: {text}")));
+            // Some Ollama templates (qwen2.5vl and other vision models) do
+            // not implement tool calling at all and reject the whole request
+            // with 400 "does not support tools". Re-issue without the tool
+            // schema so the model still answers as plain chat instead of the
+            // turn failing outright.
+            let rejects_tools = status == reqwest::StatusCode::BAD_REQUEST
+                && text.to_lowercase().contains("tool");
+            if !rejects_tools || body.get("tools").is_none() {
+                return Err(Error::Provider(format!("http {status}: {text}")));
+            }
+            let mut bare = body.clone();
+            if let Some(obj) = bare.as_object_mut() {
+                obj.remove("tools");
+            }
+            resp = self
+                .client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&bare)
+                .send()
+                .await
+                .map_err(|e| Error::Provider(format!("http: {e}")))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(Error::Provider(format!("http {status}: {text}")));
+            }
         }
 
         let byte_stream = resp.bytes_stream();
@@ -392,31 +418,51 @@ impl ParseState {
 /// can dispatch it as a real tool call. Returns `None` when the buffer
 /// doesn't match the leak shape or names a tool we didn't advertise.
 fn try_extract_leaked_tool_call(text: &str, tool_names: &[String]) -> Option<(String, String)> {
-    let mut s = text.trim();
-    // Strip an optional ```json / ``` fence pair.
-    if let Some(rest) = s.strip_prefix("```json") {
-        s = rest.trim();
-    } else if let Some(rest) = s.strip_prefix("```") {
-        s = rest.trim();
+    // Models rarely emit the call alone — a preamble ("ได้ครับ") or a
+    // trailing summary ("## สรุป") usually wraps the fence, so a whole-string
+    // match almost never fires. Scan every fenced block, then the widest
+    // `{ … }` span, and accept the first one that parses as a call to an
+    // advertised tool.
+    let mut candidates: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("```") {
+        let after = &rest[open + 3..];
+        let after = after.strip_prefix("json").unwrap_or(after);
+        let Some(close) = after.find("```") else { break };
+        candidates.push(after[..close].trim());
+        rest = &after[close + 3..];
     }
-    if let Some(stripped) = s.strip_suffix("```") {
-        s = stripped.trim();
+    if let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) {
+        if a < b {
+            candidates.push(text[a..=b].trim());
+        }
     }
 
-    if !s.starts_with('{') || !s.ends_with('}') {
-        return None;
+    for cand in candidates {
+        if !cand.starts_with('{') || !cand.ends_with('}') {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(cand) else {
+            continue;
+        };
+        let name = v
+            .get("name")
+            .or_else(|| v.get("tool"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let Some(name) = name else { continue };
+        let Some(arguments) = v.get("arguments").or_else(|| v.get("parameters")) else {
+            continue;
+        };
+        if !arguments.is_object() {
+            continue;
+        }
+        if !tool_names.iter().any(|n| n == &name) {
+            continue;
+        }
+        return Some((name, arguments.to_string()));
     }
-
-    let v: Value = serde_json::from_str(s).ok()?;
-    let name = v.get("name")?.as_str()?.to_string();
-    let arguments = v.get("arguments")?;
-    if !arguments.is_object() {
-        return None;
-    }
-    if !tool_names.iter().any(|n| n == &name) {
-        return None;
-    }
-    Some((name, arguments.to_string()))
+    None
 }
 
 /// Parse a single NDJSON line from the Ollama stream. Emits zero or more events.
@@ -631,6 +677,37 @@ mod tests {
         }
         assert_eq!(events[3], ProviderEvent::ContentBlockStop);
         assert!(matches!(events[4], ProviderEvent::MessageStop { .. }));
+    }
+
+    #[test]
+    fn leaked_tool_call_wrapped_in_prose_is_recovered() {
+        // Real qwen2.5-coder output: the fenced call is followed by a
+        // fabricated summary, so a whole-buffer match never fires.
+        let mut state = ParseState::with_tools(vec!["Write".into()]);
+        let events = {
+            let mut out = Vec::new();
+            for line in [
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":"```json\n{\"name\": \"Write\", \"arguments\": {\"path\": \"/tmp/a.txt\", \"content\": \"ok\"}}\n```\n\n## สรุป\n- สร้างไฟล์แล้ว"},"done":false}"#,
+                r#"{"model":"qwen2.5-coder","message":{"role":"assistant","content":""},"done":true}"#,
+            ] {
+                out.extend(parse_line(line, &mut state).unwrap());
+            }
+            out
+        };
+        assert_eq!(
+            events[1],
+            ProviderEvent::ToolUseStart {
+                id: "ollama-leaked-call".into(),
+                name: "Write".into(),
+                thought_signature: None,
+            }
+        );
+        match &events[2] {
+            ProviderEvent::ToolUseDelta { partial_json } => {
+                assert!(partial_json.contains("/tmp/a.txt"));
+            }
+            e => panic!("expected ToolUseDelta, got {e:?}"),
+        }
     }
 
     #[test]

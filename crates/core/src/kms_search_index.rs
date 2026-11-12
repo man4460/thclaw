@@ -433,6 +433,48 @@ impl SearchIndex {
         self.search_scoped(query_str, tags_filter, category_filter, limit, None)
     }
 
+    /// Candidate queries for a natural-language message, best first.
+    ///
+    /// A whole sentence is the wrong input: [`Self::build_query`] turns a
+    /// spaceless run into a **phrase**, so a Thai message ("ลาพักผ่อนต้องแจ้ง
+    /// ล่วงหน้ากี่วัน") demands that exact string inside the page and matches
+    /// nothing — which is why automatic retrieval surfaced no pages for real
+    /// messages even when the base plainly covered the topic. The word
+    /// tokenizer does not split Thai either, so truncating the leading run is
+    /// what actually finds a page: a message leads with its subject, and the
+    /// first few characters of it are the words the page contains.
+    pub fn keyword_candidates(&self, q: &str, max_terms: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if let Some(mut analyzer) = self.index.tokenizers().get(WORD_TOKENIZER) {
+            let mut stream = analyzer.token_stream(q);
+            let mut tokens: Vec<String> = Vec::new();
+            while stream.advance() {
+                let t = stream.token().text.clone();
+                if !t.trim().is_empty() && !tokens.contains(&t) {
+                    tokens.push(t);
+                }
+                if tokens.len() >= max_terms {
+                    break;
+                }
+            }
+            if tokens.len() > 1 {
+                out.push(tokens.join(" "));
+            }
+        }
+        // Leading-run prefixes, longest first: 14 / 10 / 7 / 5 characters.
+        let run: String = q.chars().take_while(|c| !c.is_whitespace()).collect();
+        for n in [14usize, 10, 7, 5] {
+            let cand: String = run.chars().take(n).collect();
+            if cand.chars().count() >= 4 && !out.iter().any(|c| c == &cand) {
+                out.push(cand);
+            }
+        }
+        if out.is_empty() {
+            out.push(q.to_string());
+        }
+        out
+    }
+
     /// The query, as a disjunction of per-term clauses.
     ///
     /// Built by hand rather than with tantivy's `QueryParser`, for two

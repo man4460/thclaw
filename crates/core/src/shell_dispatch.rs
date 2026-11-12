@@ -2296,6 +2296,25 @@ pub async fn dispatch(
                 Err(e) => emit(events_tx, format!("create failed: {e}")),
             }
         }
+        SlashCommand::KmsAuto(on) => {
+            match crate::config::ProjectConfig::set_kms_auto(on) {
+                Ok(()) => {
+                    broadcast_kms_update(events_tx);
+                    emit(
+                        events_tx,
+                        if on {
+                            "KMS auto-retrieval ON — every base with pages is searched for each \
+                             message."
+                                .to_string()
+                        } else {
+                            "KMS auto-retrieval OFF — only pinned bases are searched."
+                                .to_string()
+                        },
+                    );
+                }
+                Err(e) => emit(events_tx, format!("save failed: {e}")),
+            }
+        }
         SlashCommand::KmsUse(name) => {
             // Settle on the base's real name before anything is compared or
             // saved: `resolve` also finds a base by slug, and recording the

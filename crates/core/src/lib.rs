@@ -140,6 +140,7 @@ pub mod skills;
 pub mod skills_state;
 pub mod sso;
 pub mod subagent;
+pub mod subagent_runs;
 pub mod team;
 pub mod telegram;
 #[cfg(feature = "kms_search_index")]

@@ -575,6 +575,9 @@ pub enum SlashCommand {
     },
     KmsUse(String),
     KmsOff(String),
+    /// `/kms auto on|off` — whether pre-retrieval scores every base or only
+    /// the pinned ones.
+    KmsAuto(bool),
     KmsShow(String),
     KmsIngest {
         name: String,
@@ -3528,6 +3531,13 @@ fn parse_kms_subcommand(args: &str) -> SlashCommand {
                 SlashCommand::KmsUse(whole_name(rest))
             }
         }
+        "auto" => match rest.trim() {
+            "on" | "" => SlashCommand::KmsAuto(true),
+            "off" => SlashCommand::KmsAuto(false),
+            other => SlashCommand::Unknown(format!(
+                "unknown /kms auto '{other}' — use /kms auto on | off"
+            )),
+        },
         "off" | "unuse" => {
             if rest.is_empty() {
                 SlashCommand::Unknown("usage: /kms off <name>".into())
@@ -10818,6 +10828,17 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                 }
                 SlashCommand::Kms => {
                     let all = crate::kms::list_all();
+                    // The pinned/auto split is the whole mental model now:
+                    // auto covers everything, pinning only changes how much
+                    // of a base is preloaded into the prompt.
+                    println!(
+                        "{COLOR_DIM}auto-retrieval: {} (toggle with /kms auto on|off){COLOR_RESET}",
+                        if config.kms_auto {
+                            "ON — every base with pages is searched"
+                        } else {
+                            "OFF — only pinned bases are searched"
+                        }
+                    );
                     if all.is_empty() {
                         println!(
                             "{COLOR_DIM}no knowledge bases yet — try: /kms new default{COLOR_RESET}"
@@ -10834,7 +10855,8 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                             );
                         }
                         println!(
-                            "{COLOR_DIM}(* = attached to this project; toggle with /kms use | /kms off){COLOR_RESET}"
+                            "{COLOR_DIM}(* = pinned: its full index is in the prompt; click the \
+                             sidebar checkbox or /kms use | /kms off){COLOR_RESET}"
                         );
                     }
                 }
@@ -10892,6 +10914,42 @@ pub async fn run_repl(mut config: AppConfig) -> Result<()> {
                                 "{COLOR_DIM}KMS '{name}' attached{COLOR_RESET}"
                             );
                         }
+                    }
+                }
+                SlashCommand::KmsAuto(on) => {
+                    match ProjectConfig::set_kms_auto(on) {
+                        Ok(()) => {
+                            config.kms_auto = on;
+                            refresh_repl_system_prompt(
+                                &mut agent,
+                                &mut system,
+                                &factory_snapshot,
+                                &tool_registry,
+                                &config,
+                                &cwd,
+                                &skill_store_handle,
+                                &mcp_clients,
+                                &system_addendum,
+                            );
+                            if on {
+                                println!(
+                                    "{COLOR_DIM}KMS auto-retrieval ON — every base with pages is \
+                                     searched for each message; pinned bases ({}) still get their \
+                                     full index.{COLOR_RESET}",
+                                    if config.kms_active.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        config.kms_active.join(", ")
+                                    }
+                                );
+                            } else {
+                                println!(
+                                    "{COLOR_DIM}KMS auto-retrieval OFF — only pinned bases are \
+                                     searched. Pin one with /kms use <name>.{COLOR_RESET}"
+                                );
+                            }
+                        }
+                        Err(e) => println!("{COLOR_YELLOW}save failed: {e}{COLOR_RESET}"),
                     }
                 }
                 SlashCommand::KmsOff(name) => {

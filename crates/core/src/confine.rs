@@ -140,13 +140,23 @@ pub fn current_policy() -> Option<ConfinePolicy> {
         return None;
     }
     let workspace = crate::sandbox::Sandbox::root().unwrap_or_else(crate::workdir::current_workdir);
-    Some(build_policy(
+    let mut policy = build_policy(
         s.mode,
         &workspace,
         &s.extra_write,
         &s.extra_deny_read,
         crate::workdir::is_multiuser(),
-    ))
+    );
+    // An agent under a workspace host keeps its OWN state — sessions, rules,
+    // learned lessons — in its own folder. Switching the workspace can leave
+    // that folder outside the new root, which would cut the learning loop off
+    // from writing; it stays writable whatever workspace is open.
+    if crate::workdir::agent_dir().is_some() {
+        if let Ok(own) = std::env::current_dir().and_then(|d| d.canonicalize()) {
+            policy.write_roots.push(own);
+        }
+    }
+    Some(policy)
 }
 
 /// System roots granted for reads in read-mask (multiuser) mode. Everything a

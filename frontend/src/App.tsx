@@ -23,6 +23,7 @@ import {
   Home,
   PanelLeftClose,
   PanelLeftOpen,
+  ChevronUp,
 } from "lucide-react";
 import { TerminalView } from "./components/TerminalView";
 import { ChatView } from "./components/ChatView";
@@ -271,6 +272,13 @@ function shortPath(path: string, home?: string | null) {
   return home && (path === home || path.startsWith(home + "/") || path.startsWith(home + "\\"))
     ? "~" + path.slice(home.length)
     : path;
+}
+
+/** ชื่อโฟลเดอร์ท้ายพาธ — ป้ายที่แถบล่างใช้แทนพาธเต็ม (title มีเต็ม) */
+function baseName(path: string) {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const i = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return i >= 0 ? trimmed.slice(i + 1) || path : trimmed || path;
 }
 
 function DirBrowser({
@@ -963,9 +971,67 @@ export default function App() {
 
   const [started, setStarted] = useState(false);
   const [currentCwd, setCurrentCwd] = useState("");
-  // Set by the folder button, so the picker opens even though this window has
-  // already answered it once. Cleared as soon as it has been honoured.
-  const [askedForPicker, setAskedForPicker] = useState(false);
+  // Workspace switcher (แถบล่าง). สลับโฟลเดอร์ที่ทำงานได้ระหว่างใช้งาน —
+  // backend เปลี่ยน workspace root ให้ (ไฟล์/bash/sandbox ตามไป) แล้ว mint
+  // session ใหม่; `wsEpoch` remount แท็บเพื่อให้ได้ session + PTY ใหม่.
+  const [wsMenu, setWsMenu] = useState(false);
+  const [wsBrowsing, setWsBrowsing] = useState(false);
+  const [wsRecent, setWsRecent] = useState<string[]>([]);
+  const [wsError, setWsError] = useState("");
+  const [wsSwitching, setWsSwitching] = useState(false);
+  const [wsEpoch, setWsEpoch] = useState(0);
+
+  // The backend answers a switch asynchronously (`set_cwd` → `cwd_changed`)
+  // and carries the recent-folder list on every `current_cwd`.
+  useEffect(() => {
+    const unsub = subscribe((msg) => {
+      if (msg.type === "current_cwd") {
+        if (Array.isArray(msg.recent_dirs)) {
+          setWsRecent(msg.recent_dirs as string[]);
+        }
+        return;
+      }
+      if (msg.type !== "cwd_changed") return;
+      setWsSwitching(false);
+      if (!msg.ok) {
+        setWsError(
+          typeof msg.error === "string" ? msg.error : "สลับ workspace ไม่สำเร็จ",
+        );
+        return;
+      }
+      if (typeof msg.path === "string" && msg.path) setCurrentCwd(msg.path);
+      setWsMenu(false);
+      setWsBrowsing(false);
+      setWsError("");
+      setWsEpoch((n) => n + 1);
+      send({ type: "get_cwd" });
+    });
+    return unsub;
+  }, []);
+
+  // Refresh the recent list whenever the menu opens.
+  useEffect(() => {
+    if (wsMenu) send({ type: "get_cwd" });
+  }, [wsMenu]);
+
+  const switchWorkspace = useCallback(
+    (path: string) => {
+      const next = path.trim();
+      if (!next) return;
+      if (next === currentCwd) {
+        setWsMenu(false);
+        setWsBrowsing(false);
+        return;
+      }
+      setWsError("");
+      setWsSwitching(true);
+      // The PTY is bound to the folder it spawned in — kill it so the
+      // remounted TerminalView starts a fresh one in the new workspace.
+      send({ type: "pty_kill" });
+      send({ type: "set_cwd", path: next });
+    },
+    [currentCwd],
+  );
   // Drop the claim on leaving full-screen — the next shell (or the
   // next full-screen session) must re-declare it. The reference shell
   // re-claims in its `onFullscreen(active=true)` handler.
@@ -1231,7 +1297,7 @@ export default function App() {
     return (
       <>
         <StartupModal
-          force={askedForPicker}
+          force={false}
           onStart={(cwd, initialTab) => {
             setCurrentCwd(cwd);
             if (initialTab) {
@@ -1242,7 +1308,6 @@ export default function App() {
               // Toggle off any time with ⌘⇧U / Ctrl⇧U.
               if (initialTab === "ui") setFullscreen(true);
             }
-            setAskedForPicker(false);
             setStarted(true);
           }}
         />
@@ -1453,7 +1518,7 @@ export default function App() {
             // leaving a floating controls bar over other tabs (index.css).
             const cls = `absolute inset-0 ${tabsHidden ? "invisible pointer-events-none tab-inactive" : ""}`;
             return (
-              <div key={id} className={cls}>
+              <div key={`${id}:${wsEpoch}`} className={cls}>
                 {id === "terminal" && (
                   <TerminalView active={isActive} modalOpen={modalOpen} />
                 )}
@@ -1569,23 +1634,116 @@ export default function App() {
             lineHeight: "16px",
           }}
         >
-          <button
-            onClick={() => {
-              // Kill the current PTY so a fresh one spawns in the new dir.
-              send({ type: "pty_kill" });
-              setAskedForPicker(true);
-              setStarted(false);
-              setCurrentCwd("");
-            }}
-            className="p-2 sm:p-1 rounded hover:bg-white/10 transition-colors"
-            title="Change working directory"
-            style={{ flexShrink: 0 }}
-          >
-            <Folder size={14} style={{ opacity: 0.7 }} />
-          </button>
-          <span className="truncate font-mono" title={currentCwd}>
-            {currentCwd}
-          </span>
+          <div className="relative" style={{ flexShrink: 1, minWidth: 0 }}>
+            <button
+              onClick={() => {
+                setWsError("");
+                setWsMenu((v) => !v);
+              }}
+              className="flex items-center gap-1.5 max-w-[60vw] px-1.5 py-1 rounded hover:bg-white/10 transition-colors"
+              title={`Workspace: ${currentCwd} — คลิกเพื่อสลับ`}
+              style={{ color: "var(--text-primary)", minWidth: 0 }}
+            >
+              <Folder size={14} style={{ opacity: 0.7, flexShrink: 0 }} />
+              <span className="truncate font-mono">{baseName(currentCwd)}</span>
+              <ChevronUp
+                size={12}
+                style={{
+                  opacity: 0.5,
+                  flexShrink: 0,
+                  transform: wsMenu ? "rotate(180deg)" : undefined,
+                }}
+              />
+            </button>
+            {wsMenu && (
+              <>
+                {/* คลิกที่อื่นเพื่อปิดเมนู */}
+                <div
+                  className="fixed inset-0 z-[60]"
+                  onClick={() => setWsMenu(false)}
+                />
+                <div
+                  className="absolute z-[61] rounded-lg shadow-2xl p-1.5"
+                  style={{
+                    bottom: "calc(100% + 6px)",
+                    left: 0,
+                    width: 340,
+                    maxWidth: "92vw",
+                    background: "var(--bg-secondary)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <div
+                    className="px-2 pt-1 pb-1 text-[10px] uppercase tracking-wide"
+                    style={{ color: "var(--text-secondary)", opacity: 0.7 }}
+                  >
+                    Workspace
+                  </div>
+                  <div
+                    className="px-2 pb-1.5 font-mono text-[11px] truncate"
+                    style={{ color: "var(--text-secondary)" }}
+                    title={currentCwd}
+                  >
+                    {currentCwd}
+                  </div>
+                  {wsRecent
+                    .filter((dir) => dir !== currentCwd)
+                    .map((dir) => (
+                      <button
+                        key={dir}
+                        onClick={() => switchWorkspace(dir)}
+                        className="w-full text-left px-2 py-1.5 rounded hover:bg-white/10 transition-colors"
+                        title={dir}
+                      >
+                        <div
+                          className="flex items-center gap-1.5 text-xs"
+                          style={{ color: "var(--text-primary)" }}
+                        >
+                          <Folder size={12} style={{ opacity: 0.6, flexShrink: 0 }} />
+                          <span className="truncate">{baseName(dir)}</span>
+                        </div>
+                        <div
+                          className="font-mono text-[10px] truncate pl-[18px]"
+                          style={{ color: "var(--text-secondary)", opacity: 0.7 }}
+                        >
+                          {dir}
+                        </div>
+                      </button>
+                    ))}
+                  <button
+                    onClick={() => setWsBrowsing(true)}
+                    className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded hover:bg-white/10 transition-colors text-xs"
+                    style={{ color: "var(--text-primary)" }}
+                  >
+                    <FolderOpen size={13} style={{ opacity: 0.7 }} />
+                    เปิดโฟลเดอร์อื่น…
+                  </button>
+                  {wsSwitching && (
+                    <div
+                      className="px-2 py-1 text-[11px]"
+                      style={{ color: "var(--text-secondary)" }}
+                    >
+                      กำลังสลับ workspace…
+                    </div>
+                  )}
+                  {wsError && (
+                    <div
+                      className="px-2 py-1 text-[11px] break-words"
+                      style={{ color: "var(--danger, #e06c75)" }}
+                    >
+                      {wsError}
+                    </div>
+                  )}
+                  <div
+                    className="px-2 pt-1 pb-1 text-[10px]"
+                    style={{ color: "var(--text-secondary)", opacity: 0.6 }}
+                  >
+                    สลับ workspace = เริ่มบทสนทนาใหม่ในโฟลเดอร์นั้น (ของเดิมถูกบันทึกไว้)
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
           <div className="flex-1" />
           <div className="relative" style={{ flexShrink: 0 }}>
             <button
@@ -1619,6 +1777,18 @@ export default function App() {
       )}
 
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {/* Workspace switcher's folder browser — the same one the startup
+          modal uses; picking a folder switches workspace in place. */}
+      {wsBrowsing && (
+        <DirBrowser
+          start={currentCwd}
+          onClose={() => setWsBrowsing(false)}
+          onPick={(path) => {
+            setWsBrowsing(false);
+            switchWorkspace(path);
+          }}
+        />
+      )}
       {showLineConnect && (
         <LineConnectModal onClose={() => setShowLineConnect(false)} />
       )}

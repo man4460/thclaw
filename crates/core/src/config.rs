@@ -180,12 +180,23 @@ pub struct AppConfig {
     /// prefixed with the server name (e.g. `"filesystem.read_file"`).
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
-    /// Names of active KMS (knowledge bases). Each active KMS's `index.md`
-    /// is concatenated into the system prompt, and `KmsRead` / `KmsSearch`
-    /// tools are registered. Empty by default — users opt in per-project
-    /// via the sidebar or `/kms use NAME`.
+    /// Names of **pinned** KMS (knowledge bases) — a base listed here gets its
+    /// full `index.md` spliced into the system prompt, so the model sees its
+    /// whole table of contents without searching. Pinning is an explicit
+    /// "this session is about that base" statement; it is no longer the switch
+    /// that enables retrieval (see [`Self::kms_auto`]).
     #[serde(default)]
     pub kms_active: Vec<String>,
+
+    /// **Automatic knowledge retrieval.** When `true` (the default), a user
+    /// message is scored against every knowledge base that has pages, and the
+    /// best-matching topic pages are named in a `<system-reminder>` on that
+    /// message — no pinning required. Bases not pinned contribute a one-line
+    /// catalog entry to the system prompt (name + topic) so the model can
+    /// choose to `KmsSearch` them, instead of paying for every index on every
+    /// turn. `/kms auto off` restores the old pinned-only behaviour.
+    #[serde(default = "default_true")]
+    pub kms_auto: bool,
 
     /// **Self-improving AI Agent (auto-learn).** Opt-in: when `true`,
     /// each session-end automatically files the just-closed session as
@@ -594,6 +605,14 @@ fn default_auto_learn_kms() -> String {
     "self_learn".to_string()
 }
 
+/// Automatic KMS retrieval default — ON. A user who has curated knowledge
+/// bases should not have to tick a box before the model may look at them;
+/// they are scored against each message instead, and only the pages above
+/// the relevance floor are surfaced.
+fn default_true() -> bool {
+    true
+}
+
 /// Browser automation default — ON since 0.49.2 (docs/browser). The
 /// injection in `AppConfig::load()` still degrades gracefully: it's
 /// skipped when the launch command isn't on PATH, so node-less
@@ -727,6 +746,7 @@ impl Default for AppConfig {
             skills_listing_strategy: "names-only".to_string(),
             mcp_servers: Vec::new(),
             kms_active: Vec::new(),
+            kms_auto: default_true(),
             auto_learn: false,
             session_reset_per_turn: false,
             auto_learn_kms: default_auto_learn_kms(),
@@ -1175,6 +1195,11 @@ pub struct KmsSettings {
     /// every name in the list gets its `index.md` spliced into the
     /// system prompt.
     pub active: Vec<String>,
+    /// Automatic retrieval across **every** base that has pages, not just
+    /// [`Self::active`]. Defaults to `true`; `/kms auto off` writes `false`
+    /// to restore pinned-only behaviour.
+    #[serde(default = "default_true")]
+    pub auto: bool,
 }
 
 impl AppConfig {
@@ -1731,7 +1756,23 @@ impl ProjectConfig {
     /// there. Creates the file if it doesn't exist yet.
     pub fn set_active_kms(active: Vec<String>) -> Result<()> {
         let mut current = Self::load().unwrap_or_default();
-        current.kms = Some(KmsSettings { active });
+        // Keep the persisted auto flag: this setter must not silently turn
+        // automatic retrieval back on for someone who turned it off.
+        let auto = current.kms.as_ref().map(|k| k.auto).unwrap_or(true);
+        current.kms = Some(KmsSettings { active, auto });
+        current.save()
+    }
+
+    /// Persist the automatic-retrieval switch (`/kms auto on|off`) alongside
+    /// the pinned list, so both live in one `kms` block in settings.json.
+    pub fn set_kms_auto(auto: bool) -> Result<()> {
+        let mut current = Self::load().unwrap_or_default();
+        let active = current
+            .kms
+            .as_ref()
+            .map(|k| k.active.clone())
+            .unwrap_or_default();
+        current.kms = Some(KmsSettings { active, auto });
         current.save()
     }
 
@@ -1862,6 +1903,7 @@ impl ProjectConfig {
         }
         if let Some(ref kms) = self.kms {
             config.kms_active = kms.active.clone();
+            config.kms_auto = kms.auto;
         }
         if let Some(ref bash) = self.bash {
             if let Some(ref s) = bash.sandbox {

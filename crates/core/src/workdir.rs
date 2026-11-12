@@ -63,11 +63,73 @@ pub fn current_workdir() -> PathBuf {
 /// sessions and memory stay its own, but its files are the workspace's: the
 /// host passes `THCLAWS_WORKSPACE_ROOT`, and every agent reads and writes
 /// there. Without the variable this is the process cwd, as before.
+///
+/// A workspace the user switched to from the GUI (`workspace_override`) wins
+/// over the host's default: files, bash cwd and the sandbox follow the user's
+/// folder while the agent's own folder — its cwd — stays where it is.
 pub fn workspace_root() -> PathBuf {
+    if let Some(dir) = workspace_override() {
+        return dir;
+    }
     match std::env::var("THCLAWS_WORKSPACE_ROOT") {
         Ok(s) if !s.trim().is_empty() => PathBuf::from(s),
         _ => std::env::current_dir().unwrap_or_default(),
     }
+}
+
+/// The folder the user picked as their workspace, or `None` for the default.
+///
+/// Persisted at the agent's own `<cwd>/.thclaws/state/workspace_root` so a
+/// restart lands back in the folder they left off in; read once, lazily, since
+/// [`workspace_root`] sits on every tool path.
+static OVERRIDE: std::sync::RwLock<(bool, Option<PathBuf>)> =
+    std::sync::RwLock::new((false, None));
+
+fn override_file() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join(".thclaws").join("state").join("workspace_root"))
+}
+
+/// The persisted switch, or `None` when the workspace is the default one.
+pub fn workspace_override() -> Option<PathBuf> {
+    if let Ok(g) = OVERRIDE.read() {
+        if g.0 {
+            return g.1.clone();
+        }
+    }
+    let loaded = override_file()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| PathBuf::from(s.trim()))
+        .filter(|p| p.is_dir());
+    if let Ok(mut w) = OVERRIDE.write() {
+        w.0 = true;
+        w.1 = loaded.clone();
+    }
+    loaded
+}
+
+/// Point the workspace at `dir`, or clear the switch with `None`. Persisted, so
+/// the choice survives a restart. Callers re-init the sandbox afterwards.
+pub fn set_workspace_override(dir: Option<PathBuf>) -> std::io::Result<()> {
+    if let Some(file) = override_file() {
+        match &dir {
+            Some(d) => {
+                if let Some(parent) = file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&file, format!("{}\n", d.display()))?;
+            }
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+    }
+    if let Ok(mut w) = OVERRIDE.write() {
+        w.0 = true;
+        w.1 = dir;
+    }
+    Ok(())
 }
 
 /// finding 11: the agent's OWN folder under a workspace host.
@@ -145,6 +207,47 @@ where
 
 #[cfg(test)]
 mod tests {
+
+    /// A workspace the user switched to from the GUI wins over the host's
+    /// default, and is persisted in the agent's OWN folder — so the agent's
+    /// state stays put while the files follow the pick, and a restart lands
+    /// back in it.
+    #[test]
+    fn a_switched_workspace_wins_and_persists() {
+        let _g = crate::kms::test_env_lock();
+        let prev_env = std::env::var("THCLAWS_WORKSPACE_ROOT").ok();
+        let prev_cwd = std::env::current_dir().unwrap();
+        let host_root = tempfile::tempdir().unwrap();
+        let agent = tempfile::tempdir().unwrap();
+        let picked = tempfile::tempdir().unwrap();
+
+        std::env::set_var("THCLAWS_WORKSPACE_ROOT", host_root.path());
+        std::env::set_current_dir(agent.path()).unwrap();
+        assert_eq!(workspace_root(), host_root.path(), "host default first");
+
+        set_workspace_override(Some(picked.path().to_path_buf())).unwrap();
+        assert_eq!(workspace_root(), picked.path());
+        assert_eq!(current_workdir(), picked.path(), "tools follow the switch");
+        assert_eq!(
+            agent_dir(),
+            std::env::current_dir().ok(),
+            "the agent keeps its own folder"
+        );
+        let persisted = std::env::current_dir()
+            .unwrap()
+            .join(".thclaws/state/workspace_root");
+        assert!(persisted.exists(), "the pick survives a restart");
+
+        set_workspace_override(None).unwrap();
+        assert_eq!(workspace_root(), host_root.path(), "cleared = host default");
+        assert!(!persisted.exists(), "clearing removes the file");
+
+        std::env::set_current_dir(prev_cwd).unwrap();
+        match prev_env {
+            Some(v) => std::env::set_var("THCLAWS_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("THCLAWS_WORKSPACE_ROOT"),
+        }
+    }
 
     /// dev-plan/61: an agent under a workspace host shares the workspace's
     /// files. The host passes `THCLAWS_WORKSPACE_ROOT`; the agent's own folder

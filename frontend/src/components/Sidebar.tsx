@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Plus } from "lucide-react";
+import { ChevronRight, Plus } from "lucide-react";
 import { send, subscribe } from "../hooks/useIPC";
 import { useBranding } from "../hooks/useBranding";
 import { ModelPickerDropdown } from "./ModelPickerDropdown";
@@ -90,6 +90,10 @@ const SIDEBAR_WIDTH_KEY = "thclaws_sidebar_width";
 const SIDEBAR_WIDTH_MIN = 160;
 const SIDEBAR_WIDTH_MAX = 480;
 const SIDEBAR_WIDTH_DEFAULT = 192; // matches the original Tailwind `w-48`
+// The Knowledge list is collapsed by default — most workspaces never
+// browse KMS bases from the sidebar, and the list is tall enough to
+// push Sessions/MCP out of view. Remembered once the user opens it.
+const KNOWLEDGE_OPEN_KEY = "thclaws_sidebar_knowledge_open";
 
 export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
   // Persisted, user-resizable width. Replaces the previous `w-48`
@@ -173,6 +177,16 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
     { name: string; tools: number }[]
   >([]);
   const [kmss, setKmss] = useState<KmsInfo[]>([]);
+  // Expanded/collapsed state of the Knowledge section; starts collapsed
+  // unless the user has opened it before.
+  const [knowledgeOpen, setKnowledgeOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return localStorage.getItem(KNOWLEDGE_OPEN_KEY) === "1";
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(KNOWLEDGE_OPEN_KEY, knowledgeOpen ? "1" : "0");
+  }, [knowledgeOpen]);
   // KMS create modal (new KMS base). null = closed. Replaces the old
   // window.prompt() flow that silently failed inside the webview.
   const [kmsModal, setKmsModal] = useState<KmsCreateMode | null>(null);
@@ -789,6 +803,8 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
       {/* Knowledge bases */}
       <Section
         title="Knowledge"
+        collapsed={!knowledgeOpen}
+        onToggle={() => setKnowledgeOpen((v) => !v)}
         onHeaderContextMenu={(e) => {
           e.preventDefault();
           setKmsMenu({ x: e.clientX, y: e.clientY });
@@ -796,7 +812,7 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
         action={
           <button
             className="p-0.5 rounded hover:bg-white/10"
-            title="New KMS (right-click header to import/export OKF bundles)"
+            title="New KMS — all bases are searched automatically (right-click header to import/export OKF bundles)"
             onClick={() => setKmsModal({ kind: "kms" })}
           >
             <Plus size={12} />
@@ -825,23 +841,12 @@ export function Sidebar({ onBrowseKms }: SidebarProps = {}) {
             <div
               key={`${k.scope}:${k.name}`}
               className="flex items-center gap-1.5 px-2 py-1 rounded hover:bg-white/5"
-              title={`${k.scope} scope — checkbox toggles attach; click name to browse; right-click to rename / delete`}
+              title={`${k.scope} scope — all bases are searched automatically; click name to browse; right-click to rename / delete`}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setKmsRowMenu({ kms: k, x: e.clientX, y: e.clientY });
               }}
             >
-              <input
-                type="checkbox"
-                checked={k.active}
-                onChange={(e) =>
-                  send({
-                    type: "kms_toggle",
-                    name: k.name,
-                    active: e.target.checked,
-                  })
-                }
-              />
               <button
                 type="button"
                 onClick={() => onBrowseKms?.(k.name)}
@@ -1429,28 +1434,52 @@ function Section({
   title,
   children,
   action,
+  collapsed,
+  onToggle,
   onHeaderContextMenu,
 }: {
   title: string;
   children: React.ReactNode;
   action?: React.ReactNode;
+  /// When set, the header becomes a toggle and the body is hidden
+  /// while collapsed.
+  collapsed?: boolean;
+  onToggle?: () => void;
   onHeaderContextMenu?: (e: React.MouseEvent) => void;
 }) {
+  const collapsible = onToggle !== undefined;
   return (
     <div className="mb-2">
       <div
-        className="px-2 py-1.5 font-semibold uppercase tracking-wider flex items-center justify-between"
+        className={
+          "px-2 py-1.5 font-semibold uppercase tracking-wider flex items-center justify-between" +
+          (collapsible ? " cursor-pointer select-none hover:bg-white/5" : "")
+        }
         style={{
           color: "var(--text-secondary)",
           fontSize: "10px",
           borderBottom: "1px solid var(--border)",
         }}
+        onClick={collapsible ? onToggle : undefined}
         onContextMenu={onHeaderContextMenu}
+        title={collapsible ? (collapsed ? `Show ${title}` : `Hide ${title}`) : undefined}
       >
-        {title}
-        {action}
+        <span className="flex items-center gap-1">
+          {collapsible && (
+            <ChevronRight
+              size={10}
+              style={{
+                transform: collapsed ? "none" : "rotate(90deg)",
+                transition: "transform 120ms ease",
+              }}
+            />
+          )}
+          {title}
+        </span>
+        {/* Header actions must not trigger the collapse toggle. */}
+        {action && <span onClick={(e) => e.stopPropagation()}>{action}</span>}
       </div>
-      <div className="py-1">{children}</div>
+      {!collapsed && <div className="py-1">{children}</div>}
     </div>
   );
 }

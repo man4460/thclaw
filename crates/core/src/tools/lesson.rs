@@ -29,6 +29,41 @@ const MAX_DISTILLED_CHARS: usize = 1_400;
 /// distill time — a stale one-off is noise.
 const STALE_SECS: u64 = 90 * 24 * 60 * 60;
 
+/// Does this lesson graduate into the rules file?
+///
+/// Two ways: it repeated (`PROMOTE_AT`), or the user told us off —
+/// a correction is the highest-signal event there is, and waiting for it
+/// to happen twice means the most important lessons never become rules.
+fn promotable(l: &Lesson) -> bool {
+    // Corrections and stated preferences are the user speaking directly —
+    // they graduate on first sight. Observations need a repeat to prove
+    // they are a pattern rather than an anecdote.
+    l.count >= PROMOTE_AT
+        || l.kind.eq_ignore_ascii_case("correction")
+        || l.kind.eq_ignore_ascii_case("preference")
+}
+
+/// Lessons that belong in the rules file, newest-signal first.
+fn promoted_from(lessons: &[Lesson]) -> Vec<&Lesson> {
+    let mut promoted: Vec<&Lesson> = lessons.iter().filter(|l| promotable(l)).collect();
+    promoted.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_unix.cmp(&a.last_unix)));
+    promoted.truncate(MAX_DISTILLED);
+    promoted
+}
+
+/// Where the distilled rules file lives for a scope.
+fn rules_path(scope: &str) -> Result<PathBuf> {
+    match scope {
+        "global" => global_rules_dir()
+            .ok_or_else(|| Error::Tool("cannot resolve home dir".into()))
+            .map(|d| d.join("learned.md")),
+        _ => Ok(crate::workdir::current_workdir()
+            .join(".thclaws")
+            .join("rules")
+            .join("learned.md")),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Lesson {
     /// Normalised topic key — the identity used for counting repeats.
@@ -120,10 +155,11 @@ impl Tool for LessonTool {
     fn description(&self) -> &'static str {
         "Record what you learned so the next session doesn't repeat it. Use it \
          when the user corrects you, a test disproves an assumption, or an \
-         approach is confirmed to work. `record` adds/bumps a lesson (repeat \
-         the same `key` and its count rises); `distill` promotes lessons seen \
-         twice or more into `.thclaws/rules/learned.md` (or the global rules \
-         dir for scope=global) so they load automatically next time; `list` \
+         approach is confirmed to work. `record` adds/bumps a lesson and — when \
+         it is promotable — rewrites `.thclaws/rules/learned.md` immediately, so \
+         no follow-up call is needed: a repeat or a `kind: correction` becomes \
+         a rule the next session loads automatically. `distill` rebuilds that \
+         file from the journal (use it after retracting rules by hand); `list` \
          shows the journal; `forget` drops one. Record a lesson whenever the \
          user corrects you — that is the highest-signal event there is."
     }
@@ -242,10 +278,28 @@ impl Tool for LessonTool {
                     "✓ lesson `{key}` recorded (count {count}) in {}\n  {text}",
                     path.display()
                 );
-                if count >= PROMOTE_AT {
-                    out.push_str(
-                        "\n  → seen more than once: call Lesson(op: \"distill\") to promote it into a rules file.",
-                    );
+                let this = lessons
+                    .iter()
+                    .find(|l| l.key == key)
+                    .expect("just inserted");
+                // Auto-distill: a promotable lesson goes straight into the
+                // rules file. Before this, `record` only *suggested* distill,
+                // so the loop closed only when the agent remembered a second
+                // call — which in practice meant it never closed.
+                if promotable(this) {
+                    match rules_path(scope) {
+                        Ok(rp) => {
+                            let promoted = promoted_from(&lessons);
+                            let body = render_distilled(&promoted);
+                            write_rules(&rp, &body)?;
+                            out.push_str(&format!(
+                                "\n  → promoted into {} ({} rule(s) load automatically now)",
+                                rp.display(),
+                                promoted.len()
+                            ));
+                        }
+                        Err(e) => out.push_str(&format!("\n  → distill skipped: {e}")),
+                    }
                 }
                 Ok(out)
             }
@@ -272,46 +326,51 @@ impl Tool for LessonTool {
                         out.push_str(&format!("    evidence: {}\n", l.evidence));
                     }
                 }
-                let ready = sorted.iter().filter(|l| l.count >= PROMOTE_AT).count();
+                let ready = sorted.iter().filter(|l| promotable(l)).count();
                 if ready > 0 {
                     out.push_str(&format!(
-                        "\n{ready} lesson(s) ready to promote — Lesson(op: \"distill\", scope: \"{scope}\")."
+                        "\n{ready} promotable lesson(s) — recorded ones are already in the rules file; \
+                         run Lesson(op: \"distill\", scope: \"{scope}\") to rewrite it after hand edits."
                     ));
                 }
                 Ok(out)
             }
             "distill" => {
-                let lessons = load(&path);
                 let now = now_unix();
-                let mut promoted: Vec<&Lesson> = lessons
+                // Drop stale one-offs first: a single observation nobody
+                // repeated is noise, and an append-only journal eventually
+                // costs more to read than it saves.
+                let all = load(&path);
+                let kept: Vec<Lesson> = all
                     .iter()
-                    .filter(|l| l.count >= PROMOTE_AT)
-                    .filter(|l| !(l.count <= 1 && now.saturating_sub(l.last_unix) > STALE_SECS))
+                    .filter(|l| promotable(l) || now.saturating_sub(l.last_unix) <= STALE_SECS)
+                    .cloned()
                     .collect();
-                if promoted.is_empty() {
-                    return Ok("nothing to distill — no lesson has been recorded twice yet".into());
+                let pruned = all.len() - kept.len();
+                if pruned > 0 {
+                    save(&path, &kept)?;
                 }
-                promoted.sort_by(|a, b| b.count.cmp(&a.count).then(b.last_unix.cmp(&a.last_unix)));
-                promoted.truncate(MAX_DISTILLED);
+                let promoted = promoted_from(&kept);
+                if promoted.is_empty() {
+                    return Ok(
+                        "nothing to distill — no lesson has been recorded twice or marked as a correction"
+                            .into(),
+                    );
+                }
 
-                let rules_path = match scope {
-                    "global" => global_rules_dir()
-                        .ok_or_else(|| Error::Tool("cannot resolve home dir".into()))?
-                        .join("learned.md"),
-                    _ => crate::workdir::current_workdir()
-                        .join(".thclaws")
-                        .join("rules")
-                        .join("learned.md"),
-                };
-
+                let rules_path = rules_path(scope)?;
                 let body = render_distilled(&promoted);
                 write_rules(&rules_path, &body)?;
-                Ok(format!(
+                let mut out = format!(
                     "✓ distilled {} lesson(s) into {}\n  They load automatically from now on. \
                      Edit or delete that file to retract a rule.",
                     promoted.len(),
                     rules_path.display()
-                ))
+                );
+                if pruned > 0 {
+                    out.push_str(&format!("\n  Pruned {pruned} stale one-off(s) from the journal."));
+                }
+                Ok(out)
             }
             "forget" => {
                 let key = normalise_key(&req_str(&input, "key")?);
@@ -334,8 +393,8 @@ impl Tool for LessonTool {
 fn render_distilled(lessons: &[&Lesson]) -> String {
     let mut out = String::from(
         "# Learned lessons (auto-distilled)\n\n\
-         These were each recorded at least twice. Keep them; retract by editing \
-         this file.\n\n",
+         Each of these either repeated or was a direct correction from the user. Keep them; retract by \
+         editing this file.\n\n",
     );
     for l in lessons {
         let line = format!("- {}\n", l.text.trim());
@@ -379,9 +438,41 @@ mod tests {
     }
 
     #[test]
+    fn promoted_from_takes_corrections_and_repeats_only() {
+        let mut once = l("k2", 1, "one-off observation");
+        once.kind = "success".into();
+        let repeated = l("k3", 2, "seen twice");
+        let correction = l("k1", 1, "told off once");
+        let lessons = vec![once, repeated, correction];
+        let promoted = promoted_from(&lessons);
+        let keys: Vec<&str> = promoted.iter().map(|l| l.key.as_str()).collect();
+        assert!(keys.contains(&"k1"), "correction promotes");
+        assert!(keys.contains(&"k3"), "repeat promotes");
+        assert!(!keys.contains(&"k2"), "one-off success stays in journal");
+        let mut pref = l("k4", 1, "user likes X");
+        pref.kind = "preference".into();
+        assert!(promoted_from(&[pref]).len() == 1, "preference promotes");
+    }
+
+    #[test]
     fn keys_normalise_so_repeats_count() {
         assert_eq!(normalise_key("  Restart  THCLaws "), "restart thclaws");
         assert_eq!(normalise_key("a\n b\tc"), "a b c");
+    }
+
+    #[test]
+    fn correction_promotes_on_first_sight_observation_does_not() {
+        let mut correction = l("k1", 1, "Never restart twice");
+        // l() builds kind: "correction" — one occurrence is already enough.
+        assert!(promotable(&correction));
+        let mut observation = l("k2", 1, "Grep was faster here");
+        observation.kind = "success".into();
+        assert!(!promotable(&observation));
+        observation.count = PROMOTE_AT;
+        assert!(promotable(&observation));
+        correction.kind.clear();
+        correction.count = 1;
+        assert!(!promotable(&correction), "no kind, no repeat = journal only");
     }
 
     #[test]

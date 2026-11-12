@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { resolveAssetSrc } from "../lib/fileAsset";
-import { Check, Copy, Paperclip, Loader2, MessageSquare, Zap } from "lucide-react";
+import { Check, Copy, Paperclip, Loader2, MessageSquare, ChevronDown } from "lucide-react";
 import { basePath, send, subscribe } from "../hooks/useIPC";
 import { useBranding } from "../hooks/useBranding";
 import { promptHistory, recordPrompt } from "../hooks/promptHistory";
@@ -16,7 +16,7 @@ import { SlashCommandPopup } from "./SlashCommandPopup";
 import { filterCommands, type SlashCommandInfo } from "./slashCommands";
 import { McpAppIframe } from "./McpAppIframe";
 import { matchQueuedInjections } from "./injectionQueue";
-import { ActivityTicker } from "./ActivityTicker";
+import { ActivityLog, clip, describeTool } from "./ActivityLog";
 import { PlanApprovalCard } from "./PlanApprovalCard";
 import { ApprovalCard } from "./ApprovalCard";
 import { ChatTaskList } from "./ChatTaskList";
@@ -44,7 +44,16 @@ function isStatusLine(
 }
 
 type ChatMessage = {
-  role: "user" | "assistant" | "tool" | "system" | "error" | "workflow_review";
+  role:
+    | "user"
+    | "assistant"
+    | "tool"
+    | "system"
+    | "error"
+    | "workflow_review"
+    /// บรรทัดความเคลื่อนไหวของงานที่รันพื้นหลัง (subagent) — เห็นแค่ใน
+    /// แผงบันทึกการทำงาน ไม่ถูกวาดเป็นบับเบิ้ลในแชท
+    | "activity";
   content: string;
   /// `system` messages only — marks a bubble that accumulates a slash
   /// command's streamed output (e.g. `/cloud push` progress). Consecutive
@@ -93,6 +102,8 @@ type ChatMessage = {
   /// next to the ✓ glyph so the user sees the source even if the
   /// model paraphrased it away from its summary.
   toolSource?: string;
+  /// เวลาที่ข้อความเกิด (ms) — ใช้คำนวณ "ผ่านไปกี่วินาที" ใน ActivityLog
+  ts?: number;
   /// MCP-Apps widget the bubble should embed inline below the tool
   /// label (e.g. pinn.ai's image viewer). Populated from the
   /// `ui_resource` field on `chat_tool_result` when the upstream MCP
@@ -281,6 +292,106 @@ type Props = {
   active: boolean;
   modalOpen: boolean;
 };
+
+/// กลุ่ม tool call ที่ติดกัน → พับเป็นบรรทัดเดียวต่อเทิร์น
+///
+/// ก่อนหน้านี้ทุกคำสั่งวาดเป็นบรรทัดของตัวเอง เทิร์นยาว ๆ (build 20 คำสั่ง)
+/// กินพื้นที่แชทจนต้องเลื่อนผ่าน — ตอนนี้เหลือบรรทัดเดียวที่โชว์คำสั่งล่าสุด
+/// + จำนวนคำสั่ง กดแล้วกางดูทั้งชุด (ลำดับเดิม ตามด้วยรายละเอียดเต็ม)
+const MONO = "Menlo, Monaco, 'Courier New', monospace";
+
+function ToolRunBlock({ items }: { items: { msg: ChatMessage; index: number }[] }) {
+  const [open, setOpen] = useState(false);
+  const pending = items.filter((x) => !x.msg.toolDone);
+  const current = pending.length > 0 ? pending[pending.length - 1] : items[items.length - 1];
+  const { label, detail } = describeTool(current.msg);
+  const running = pending.length > 0;
+  const many = items.length > 1;
+
+  return (
+    <div className="flex justify-start">
+      <div
+        className="inline-flex max-w-[92%] flex-col text-xs sm:max-w-[80%]"
+        style={{ fontFamily: MONO, color: "var(--text-secondary)", paddingLeft: 2 }}
+      >
+        <div
+          className="group inline-flex items-baseline gap-1.5"
+          style={{ opacity: running ? 1 : 0.6 }}
+        >
+          <button
+            type="button"
+            onClick={() => many && setOpen((v) => !v)}
+            title={many ? (open ? "ย่อรายการคำสั่ง" : `กางทั้ง ${items.length} คำสั่ง`) : detail}
+            className="inline-flex min-w-0 items-baseline gap-1.5"
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              font: "inherit",
+              color: "inherit",
+              cursor: many ? "pointer" : "default",
+              textAlign: "left",
+            }}
+          >
+            <span style={{ flexShrink: 0 }}>{running ? "▸" : "✓"}</span>
+            {many && (
+              <span style={{ flexShrink: 0, opacity: 0.65 }}>{items.length} คำสั่ง</span>
+            )}
+            <span style={{ flexShrink: 0, color: "var(--text-primary)" }}>{label}</span>
+            {detail !== "" && (
+              <span className="truncate" style={{ minWidth: 0 }}>
+                {clip(detail, 100)}
+              </span>
+            )}
+            {many && (
+              <ChevronDown
+                size={10}
+                style={{
+                  flexShrink: 0,
+                  opacity: 0.7,
+                  transform: open ? "rotate(180deg)" : undefined,
+                }}
+              />
+            )}
+          </button>
+        </div>
+        {open && many && (
+          <div
+            className="flex flex-col gap-0.5"
+            style={{
+              marginLeft: 3,
+              paddingLeft: 8,
+              borderLeft: "1px solid var(--border, #2a2a2a)",
+              marginTop: 2,
+            }}
+          >
+            {items.map(({ msg, index }) => {
+              const d = describeTool(msg);
+              return (
+                <div
+                  key={index}
+                  className="inline-flex items-baseline gap-1.5"
+                  title={d.detail}
+                  style={{ opacity: msg.toolDone ? 0.6 : 1 }}
+                >
+                  <span style={{ flexShrink: 0 }}>{msg.toolDone ? "✓" : "▸"}</span>
+                  <span style={{ flexShrink: 0, color: "var(--text-primary)" }}>
+                    {d.label}
+                  </span>
+                  {d.detail !== "" && (
+                    <span className="truncate" style={{ minWidth: 0 }}>
+                      {clip(d.detail, 120)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ChatView({ active, modalOpen }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -708,6 +819,7 @@ export function ChatView({ active, modalOpen }: Props) {
                 typeof msg.tool_name === "string" ? msg.tool_name : undefined,
               toolInput: msg.input,
               toolDone: false,
+              ts: Date.now(),
             },
           ]);
           break;
@@ -782,6 +894,22 @@ export function ChatView({ active, modalOpen }: Props) {
             }
             return prev;
           });
+          break;
+        }
+        case "chat_activity": {
+          // A background subagent's activity line. Kept as its own role
+          // so it never enters the tool-bubble / chat_tool_result pairing
+          // (a tool result would otherwise mark it "done" and the row
+          // would vanish). Only the activity panel renders these.
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "activity",
+              content: msg.text as string,
+              toolDone: true,
+              ts: Date.now(),
+            },
+          ]);
           break;
         }
         case "chat_slash_output": {
@@ -935,6 +1063,10 @@ export function ChatView({ active, modalOpen }: Props) {
                 role: string;
                 content: string;
                 thinking?: string;
+                /// unix ms recorded when the message was written — restored
+                /// history keeps its ActivityLog offsets instead of showing
+                /// a stack of rows with no timing.
+                ts?: number;
               }[];
               // Compare on SPOKEN text only. The live view carries shapes
               // the store never sees — a thinking-only assistant bubble,
@@ -974,6 +1106,7 @@ export function ChatView({ active, modalOpen }: Props) {
                     content: m.content,
                     toolName: m.content,
                     toolDone: true,
+                    ...(m.ts ? { ts: m.ts } : {}),
                   } satisfies ChatMessage;
                 }
                 // Reasoning is persisted with the turn, so a reloaded
@@ -983,6 +1116,7 @@ export function ChatView({ active, modalOpen }: Props) {
                   role,
                   content: m.content,
                   ...(m.thinking ? { thinking: m.thinking } : {}),
+                  ...(m.ts ? { ts: m.ts } : {}),
                 } satisfies ChatMessage;
               });
             });
@@ -1363,9 +1497,38 @@ export function ChatView({ active, modalOpen }: Props) {
     el.style.overflowY = sh > maxHeight ? "auto" : "hidden";
   }, [input]);
 
-  const messageElements = useMemo(
-    () =>
-      messages.map((msg, i) => {
+  const messageElements = useMemo(() => {
+    // Index ของข้อความ assistant ตัวสุดท้าย — ใช้ตัดสินว่า "บรรทัดสถานะ" ไหน
+    // ยังทำงานอยู่จริง ไอคอนของบรรทัดที่จบแล้วต้องนิ่ง (✓) ไม่ใช่หมุนค้าง
+    // เพราะ `streaming` เป็นธงระดับเทิร์น ไม่ใช่ระดับข้อความ
+    let lastAssistantIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    // จับกลุ่ม tool row ที่อยู่ติดกัน (เฉพาะแบบไม่มี widget) → 1 บล็อกต่อเทิร์น
+    const toolRunAt = new Map<number, { msg: ChatMessage; index: number }[]>();
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role !== "tool" || m.uiResource) continue;
+      const prev = messages[i - 1];
+      if (prev && prev.role === "tool" && !prev.uiResource) continue;
+      const run: { msg: ChatMessage; index: number }[] = [];
+      for (
+        let j = i;
+        j < messages.length &&
+        messages[j].role === "tool" &&
+        !messages[j].uiResource;
+        j++
+      ) {
+        run.push({ msg: messages[j], index: j });
+      }
+      toolRunAt.set(i, run);
+    }
+
+    return messages.map((msg, i) => {
         // (Pre-fix this map opened with a side-channel bubble render
         // pulling state off `msg.sideChannel`. The bubble showed
         // live tool-call markers + streamed prose for every /dream
@@ -1396,12 +1559,17 @@ export function ChatView({ active, modalOpen }: Props) {
           );
         }
         if (msg.role === "tool") {
-          // tool ทั้งหมดไม่อยู่ในสตรีมแล้ว — หัวข้ออยู่ที่ ChatTaskList
-          // (ปักเหนือช่องพิมพ์) รายละเอียด/คำสั่งอยู่ที่ ActivityTicker
-          // (แถบล่างสลับให้เห็น). ยกเว้น MCP widget ที่มี UI ของตัวเอง.
-          if (!msg.uiResource) return null;
+          // คำสั่งที่ agent รัน → 1 บล็อกต่อกลุ่มที่ติดกัน (กางดูได้)
+          // รายละเอียดเต็มและประวัติย้อนหลังยังอยู่ที่แผง ActivityLog
+          // เหนือช่องพิมพ์ — ที่นี่แสดงเพื่อให้ตามงานทันในแชท
           const glyph = msg.toolDone ? "✓" : "▸";
           const copied = copiedMessageIndex === i;
+          if (!msg.uiResource) {
+            const run = toolRunAt.get(i);
+            if (run) return <ToolRunBlock key={i} items={run} />;
+            // อยู่กลางกลุ่ม — ถูกวาดไปแล้วโดยหัวกลุ่ม
+            return null;
+          }
           // MCP-Apps tools widen the bubble so the embedded iframe
           // gets meaningful width. Plain tools keep the thin
           // one-liner indicator.
@@ -1461,6 +1629,9 @@ export function ChatView({ active, modalOpen }: Props) {
         }
 
         const isAssistant = msg.role === "assistant";
+        // Activity rows belong to the activity panel (above the composer),
+        // not the conversation — never draw them as bubbles.
+        if (msg.role === "activity") return null;
         // ข้อความ assistant ที่ว่างเปล่า (engine ส่งมาระหว่าง tool call)
         // ไม่ต้องวาดเป็นบับเบิ้ลดำ ๆ — ไม่มีอะไรให้อ่าน
         if (
@@ -1483,6 +1654,9 @@ export function ChatView({ active, modalOpen }: Props) {
           msg.role === "user" && i > 0 && messages[i - 1]?.role !== "user";
         // สถานะ (สิ่งที่กำลังทำ) vs คำตอบ: ไอคอน + การจัดวางต่างกัน
         const statusLine = isStatusLine(msg.content, isAssistant, i === messages.length - 1);
+        // ยังทำงานอยู่ = บรรทัดสถานะตัวสุดท้ายและเทิร์นยังสตรีมอยู่ —
+        // บรรทัดสถานะก่อนหน้าจบไปแล้ว ต้องได้ ✓ ไม่ใช่สปินเนอร์ค้าง
+        const statusActive = statusLine && streaming && i === lastAssistantIdx;
         return (
           <div
             key={i}
@@ -1498,16 +1672,16 @@ export function ChatView({ active, modalOpen }: Props) {
                   marginRight: 6,
                   opacity: statusLine ? 0.55 : 0.85,
                 }}
-                title={statusLine ? "กำลังทำ" : "คำตอบ"}
+                title={statusLine ? (statusActive ? "กำลังทำ" : "ทำแล้ว") : "คำตอบ"}
               >
                 {statusLine ? (
-                  streaming ? (
-                    <Loader2 size={12} className="task-spin" style={{ color: "var(--accent)" }} />
+                  statusActive ? (
+                    <Loader2 size={13} className="task-spin" style={{ color: "var(--accent)" }} />
                   ) : (
-                    <Zap size={12} style={{ color: "var(--text-secondary)" }} />
+                    <Check size={13} style={{ color: "var(--text-secondary)" }} />
                   )
                 ) : (
-                  <MessageSquare size={12} style={{ color: "var(--accent)" }} />
+                  <MessageSquare size={13} style={{ color: "var(--accent)" }} />
                 )}
               </span>
             )}
@@ -1700,16 +1874,15 @@ export function ChatView({ active, modalOpen }: Props) {
             </div>
           </div>
         );
-      }),
-    [
-      messages,
-      copiedMessageIndex,
-      copyMessage,
-      handleChatLinkClick,
-      showThinking,
-      streaming,
-    ],
-  );
+      });
+  }, [
+    messages,
+    copiedMessageIndex,
+    copyMessage,
+    handleChatLinkClick,
+    showThinking,
+    streaming,
+  ]);
 
   const awaitingUserAnswer = askPrompt !== null;
   // Allow typing while the agent is streaming so the user can queue
@@ -1835,8 +2008,8 @@ export function ChatView({ active, modalOpen }: Props) {
       {/* แผนรออนุมัติ → ปุ่มอยู่ตรงนี้ด้วย ไม่พึ่ง sidebar ขวาอย่างเดียว */}
       <PlanApprovalCard />
 
-      {/* สถานะวิ่ง: บอกว่าตอนนี้ agent ทำอะไร (tool ที่รันอยู่ / บรรทัดสถานะล่าสุด) */}
-      <ActivityTicker messages={messages} streaming={streaming} />
+      {/* บันทึกการทำงาน: พับ = บรรทัดล่าสุด, กาง = รายการคำสั่งย้อนหลังทั้งหมด */}
+      <ActivityLog messages={messages} streaming={streaming} />
 
       {/* Input */}
       <form

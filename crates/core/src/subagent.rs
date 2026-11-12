@@ -9,7 +9,7 @@
 //! the definition from `~/.config/thclaws/agents.json` and uses
 //! its instructions, model override, and tool subset.
 
-use crate::agent::{collect_agent_turn_with_cancel, Agent};
+use crate::agent::Agent;
 use crate::agent_defs::{AgentDef, AgentDefsConfig};
 use crate::cancel::CancelToken;
 use crate::error::{Error, Result};
@@ -202,6 +202,21 @@ pub trait AgentFactory: Send + Sync {
         child_depth: usize,
     ) -> Result<Agent>;
 
+    /// Same as [`build`], but wires a queue the child drains at every
+    /// tool boundary — this is how a running subagent is steered
+    /// mid-flight (`TaskSay`). Default: ignore the queue and build
+    /// normally, so test stubs and third-party factories keep working.
+    async fn build_with_queue(
+        &self,
+        prompt: &str,
+        agent_def: Option<&AgentDef>,
+        child_depth: usize,
+        queue: Option<crate::subagent_runs::InjectionQueue>,
+    ) -> Result<Agent> {
+        let _ = queue;
+        self.build(prompt, agent_def, child_depth).await
+    }
+
     /// The factory's base model id — used to attribute a subagent's
     /// token usage when its `agent_def` doesn't pin its own model.
     /// Default `"unknown"` keeps test stubs simple.
@@ -324,9 +339,20 @@ impl AgentFactory for ProductionAgentFactory {
 
     async fn build(
         &self,
+        prompt: &str,
+        agent_def: Option<&AgentDef>,
+        child_depth: usize,
+    ) -> Result<Agent> {
+        self.build_with_queue(prompt, agent_def, child_depth, None)
+            .await
+    }
+
+    async fn build_with_queue(
+        &self,
         _prompt: &str,
         agent_def: Option<&AgentDef>,
         child_depth: usize,
+        queue: Option<crate::subagent_runs::InjectionQueue>,
     ) -> Result<Agent> {
         // Snapshot the live parent state ONCE — system + tools +
         // model/provider are all needed and we want them to come from
@@ -373,18 +399,32 @@ impl AgentFactory for ProductionAgentFactory {
 
         // System prompt: parent's full prompt + (optional) agent
         // instructions + (when nested) the subagent-mode addendum.
+        //
+        // `systemMode: minimal` drops the parent prompt entirely and keeps
+        // only the subagent preamble + this def's instructions. Prefill is
+        // the dominant latency term for a local model — a narrowly-scoped
+        // agent that inherits an 8-10k-token parent prompt pays ~2 minutes
+        // before it emits a token, for guidance it cannot act on anyway.
+        let minimal_system = agent_def
+            .and_then(|d| d.system_mode.as_deref())
+            .map(|m| m.eq_ignore_ascii_case("minimal"))
+            .unwrap_or(false);
+        let base_system = if minimal_system {
+            String::new()
+        } else {
+            parent_system.clone()
+        };
         let mut system = agent_def
             .map(|d| {
                 if d.instructions.is_empty() {
-                    parent_system.clone()
+                    base_system.clone()
+                } else if base_system.is_empty() {
+                    d.instructions.clone()
                 } else {
-                    format!(
-                        "{}\n\n# Agent instructions\n{}",
-                        parent_system, d.instructions
-                    )
+                    format!("{}\n\n# Agent instructions\n{}", base_system, d.instructions)
                 }
             })
-            .unwrap_or_else(|| parent_system.clone());
+            .unwrap_or_else(|| base_system.clone());
         if child_depth > 0 {
             system.push_str(&crate::prompts::load(
                 "subagent",
@@ -601,6 +641,11 @@ impl AgentFactory for ProductionAgentFactory {
         if let Some(h) = self.hooks.clone() {
             agent = agent.with_hooks(h);
         }
+        // Steerable child: the shared queue is drained after every tool
+        // result, so a `TaskSay` lands in the child's next context.
+        if let Some(q) = queue {
+            agent.use_injection_queue(q);
+        }
         Ok(agent)
     }
 }
@@ -615,6 +660,21 @@ pub struct SubAgentTool {
     /// `collect_agent_turn_with_cancel` so ctrl-C reaches a runaway
     /// subagent. None when no parent cancel is wired (CLI today).
     cancel: Option<CancelToken>,
+    /// Background mode: `call` returns a run handle immediately and the
+    /// child keeps working on its own task. Off by default so the
+    /// workflow runtime (`thclaws.subagent(...)`, which awaits the text)
+    /// and the tests keep the blocking contract; the interactive agent
+    /// turns it on.
+    background: bool,
+    /// Called with one short line per child activity — the chat surface
+    /// turns this into a live tool-call row so the user watches the
+    /// subagent work instead of a frozen spinner. Boxed callback rather
+    /// than an event bus so `core` stays free of a UI dependency.
+    activity_sink: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Parent's injection queue: a finished child pushes its digest here,
+    /// so the parent (and the user, one layer up) learns about it without
+    /// polling.
+    parent_queue: Option<crate::subagent_runs::InjectionQueue>,
 }
 
 impl SubAgentTool {
@@ -627,7 +687,30 @@ impl SubAgentTool {
                 &crate::plugins::plugin_agent_dirs(),
             ),
             cancel: None,
+            background: false,
+            activity_sink: None,
+            parent_queue: None,
         }
+    }
+
+    /// Spawn the child on its own task and return a handle instead of
+    /// blocking the parent's turn. Pair with the `TaskStatus` / `TaskWait`
+    /// / `TaskSay` / `TaskCancel` control tools.
+    pub fn with_background(mut self, on: bool) -> Self {
+        self.background = on;
+        self
+    }
+
+    /// Live per-activity callback (tool calls, rounds, steering, result).
+    pub fn with_activity_sink(mut self, sink: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        self.activity_sink = Some(sink);
+        self
+    }
+
+    /// Queue that receives a completion digest for each background run.
+    pub fn with_parent_queue(mut self, queue: crate::subagent_runs::InjectionQueue) -> Self {
+        self.parent_queue = Some(queue);
+        self
     }
 
     pub fn with_depth(mut self, depth: usize) -> Self {
@@ -679,12 +762,15 @@ impl Tool for SubAgentTool {
 
     fn description(&self) -> &'static str {
         "Launch a sub-agent with its own history to handle a bounded subtask. \
-         The sub-agent runs independently, may call tools (and spawn further \
-         sub-agents up to the recursion limit), and returns its final response \
-         as text. Use `agent` to pick a named agent definition from agents.json. \
-         When several subtasks are independent, emit all their `Task` calls in \
-         a SINGLE message — they run concurrently. Batching them with a tool \
-         that isn't read-only forces the whole message to run one call at a time."
+         Returns immediately with a run id (`sub-…`); the child keeps working in \
+         the background while you continue. Watch it with `TaskWait` (blocks until \
+         it reports new activity or finishes), read state/result with `TaskStatus`, \
+         steer it mid-task with `TaskSay`, stop it with `TaskCancel`. Every child \
+         activity also streams to the user's ticker, and a completion digest lands \
+         in your context on its own. Use `agent` to pick a named agent definition \
+         (a local model is faster and cheaper for mechanical work). When several \
+         subtasks are independent, emit all their `Task` calls in a SINGLE message \
+         — they run concurrently."
     }
 
     fn input_schema(&self) -> Value {
@@ -754,79 +840,276 @@ impl Tool for SubAgentTool {
         }
 
         let child_depth = self.depth + 1;
-        let agent = self.factory.build(&prompt, agent_def, child_depth).await?;
-        let stream = agent.run_turn(prompt);
-        // M6.33 SUB4: collect_agent_turn_with_cancel observes the
-        // parent's cancel token between stream events. Pre-fix the
-        // subagent stream ran to completion regardless of ctrl-C.
-        let outcome = collect_agent_turn_with_cancel(stream, self.cancel.clone()).await?;
+        let role = agent_name.unwrap_or("Task").to_string();
+        let pinned_model = agent_def.and_then(|d| d.model.clone());
 
-        // Audit: persist the sub-agent's full transcript to its own child
-        // session (its intermediate steps never reached the parent context).
-        persist_subagent_session(
-            &agent,
-            &self.factory.base_model(),
-            agent_name.unwrap_or("Task"),
-        );
-
-        // dev-plan/32 Stage I: push this turn's Usage to the workflow
-        // usage sink if one is active on this thread. No-op outside
-        // `/workflow run` — model-driven Task calls and tests stay
-        // unaffected.
-        if let Some(u) = outcome.usage.as_ref() {
-            crate::workflow::push_worker_usage(u.clone());
-
-            // A subagent's tokens were otherwise DROPPED outside a
-            // workflow — the orchestrator's `cumulative_usage` only
-            // counts the parent's own provider calls, not the work a
-            // Task spawned. Record the subagent's usage to the global
-            // per-model tracker AND the per-workspace ledger so a
-            // task's true cost (orchestrator + every subagent) is
-            // captured. Attribute to the subagent's *effective* model
-            // (its `agent_def` may pin a cheaper one than the parent) —
-            // same selection as the build path, so a cross-provider pin that
-            // fell back to the session model is billed to what actually ran.
-            let base_model = self.factory.base_model();
-            // Same selection as the build path (same config-driven usability
-            // check) so a cross-provider pin is billed to what actually ran.
-            let attr_config = crate::config::AppConfig::load().unwrap_or_default();
-            let eff_model = subagent_model(
-                agent_def.and_then(|d| d.model.as_deref()),
-                &base_model,
-                &attr_config,
-            );
-            let provider = crate::providers::ProviderKind::detect(eff_model)
-                .map(|k| k.name())
-                .unwrap_or("unknown");
-            let role = agent_name.unwrap_or("subagent");
-            // The per-model tracker gets it from the session's next footer
-            // (`take_side_usage`), which knows the session's own usage dir.
-            crate::usage::note_side_usage(eff_model, u);
-            if let Ok(cwd) = std::env::current_dir() {
-                crate::usage::append_usage_ledger(&cwd, role, provider, eff_model, u);
-            }
-        }
-
-        if outcome.text.is_empty() {
-            // L1: distinguish "did nothing" from "acted but produced no
-            // final text". A sub-agent that ran tools (e.g. wrote files)
-            // but hit max_iterations or stopped without a closing message
-            // used to surface a spurious "empty response" error to the
-            // caller even though work happened. Return a synthetic summary
-            // of the tool activity instead; only error when truly nothing
-            // ran.
-            if outcome.tool_calls.is_empty() {
-                Err(Error::Agent("sub-agent returned empty response".into()))
-            } else {
-                Ok(format!(
-                    "(sub-agent finished without a final text message; ran {} tool call(s): {})",
-                    outcome.tool_calls.len(),
-                    outcome.tool_calls.join(", ")
-                ))
-            }
+        // Background mode: register the run first so the child can stream
+        // into it, then hand the child its own task. The parent's turn
+        // continues immediately — that is the whole point.
+        let run = if self.background {
+            Some(crate::subagent_runs::start_run(
+                role.clone(),
+                input
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("sub-task")
+                    .to_string(),
+            ))
         } else {
-            Ok(outcome.text)
+            None
+        };
+        let inject_queue = run.as_ref().map(|r| r.injections.clone());
+        let mut agent = self
+            .factory
+            .build_with_queue(&prompt, agent_def, child_depth, inject_queue)
+            .await?;
+        // A background run owns its cancellation, exactly like a
+        // side-channel agent: the factory wires the PARENT's token into
+        // the child, so a parent cancel (or the worker's stop button)
+        // would kill every detached child the moment the parent's turn
+        // is interrupted — the opposite of "it runs on its own".
+        // Replace it with the run's own token; `TaskCancel` is how the
+        // parent stops one.
+        if let Some(r) = &run {
+            agent = agent.with_cancel(r.cancel.clone());
         }
+
+        let ctx = ChildCtx {
+            factory: self.factory.clone(),
+            run: run.clone(),
+            sink: self.activity_sink.clone(),
+            // Only the blocking path follows the parent's cancel.
+            parent_cancel: if self.background {
+                None
+            } else {
+                self.cancel.clone()
+            },
+            role,
+            pinned_model,
+        };
+
+        let Some(run) = run else {
+            // Blocking path (workflow scripts, tests): unchanged contract.
+            return drive_child(ctx, agent, prompt).await;
+        };
+
+        let id = run.id.clone();
+        let run_agent = run.agent.clone();
+        let handle_sink = self.activity_sink.clone();
+        let parent_queue = self.parent_queue.clone();
+        tokio::spawn(async move {
+            // Counted as engine work while it runs, so the cloud
+            // heartbeat keeps the pod alive and the UI shows "busy".
+            let _busy = crate::agent_activity::BusyGuard::for_side_channel();
+            let result = drive_child(ctx, agent, prompt).await;
+            let done_line = match &result {
+                Ok(text) => format!(
+                    "[{}] done in {:.1}s — {}",
+                    run.id,
+                    run.elapsed().as_secs_f64(),
+                    clip_line(text, 160)
+                ),
+                Err(e) => format!(
+                    "[{}] failed in {:.1}s — {}",
+                    run.id,
+                    run.elapsed().as_secs_f64(),
+                    clip_line(&e.to_string(), 160)
+                ),
+            };
+            if let Some(s) = &handle_sink {
+                s(&done_line);
+            }
+            // The parent learns about completion without polling — the
+            // digest queues into the parent's injection stream, which is
+            // drained at its next tool boundary. Only while the parent is
+            // mid-turn: queueing into an idle agent would surface a stale
+            // digest in an unrelated later turn.
+            if let Some(q) = &parent_queue {
+                if crate::agent_activity::is_agent_busy() {
+                    q.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_back(run.completion_digest());
+                }
+            }
+        });
+
+        Ok(format!(
+            "started {id} ({}). It runs in the background.\n\
+             - TaskWait {{ id, since }} blocks until it reports new activity or finishes\n\
+             - TaskStatus {{ id }} reads state + result at any time\n\
+             - TaskSay {{ id, text }} steers it mid-task\n\
+             - TaskCancel {{ id }} stops it",
+            run_agent
+        ))
+    }
+}
+
+/// Everything the child driver needs that outlives `SubAgentTool::call`
+/// (the background path moves it into the spawned task).
+struct ChildCtx {
+    factory: Arc<dyn AgentFactory>,
+    run: Option<Arc<crate::subagent_runs::SubagentRun>>,
+    sink: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    parent_cancel: Option<CancelToken>,
+    role: String,
+    pinned_model: Option<String>,
+}
+
+impl ChildCtx {
+    /// Record one activity line: into the run (so `TaskStatus`/`TaskWait`
+    /// see it) and to the UI sink (so the user watches it live).
+    fn note(&self, kind: &'static str, text: String) {
+        if let Some(r) = &self.run {
+            r.push(kind, text.clone());
+        }
+        if let Some(s) = &self.sink {
+            s(&text);
+        }
+    }
+}
+
+/// Drive one child turn: stream events, record activity, finish the run,
+/// persist the child session, and account its tokens. Returns the text the
+/// parent sees (the blocking path returns it directly; the background path
+/// stores it on the run).
+async fn drive_child(
+    ctx: ChildCtx,
+    agent: crate::agent::Agent,
+    prompt: String,
+) -> Result<String> {
+    use futures::StreamExt;
+
+    let mut out = crate::agent::AgentTurnOutcome::default();
+    let stream = agent.run_turn(prompt);
+    let mut stream = Box::pin(stream);
+    let child_cancel = ctx.run.as_ref().map(|r| r.cancel.clone());
+    let cancelled = async {
+        match (child_cancel.as_ref(), ctx.parent_cancel.as_ref()) {
+            (Some(a), Some(b)) => {
+                tokio::select! {
+                    _ = a.cancelled() => {},
+                    _ = b.cancelled() => {},
+                }
+            }
+            (Some(a), None) => a.cancelled().await,
+            (None, Some(b)) => b.cancelled().await,
+            (None, None) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(cancelled);
+
+    loop {
+        let next = tokio::select! {
+            ev = stream.next() => ev,
+            _ = &mut cancelled => {
+                if let Some(r) = &ctx.run {
+                    r.push("note", "cancelled");
+                    r.finish(crate::subagent_runs::RunState::Cancelled);
+                }
+                return Err(Error::Agent("cancelled by user".into()));
+            }
+        };
+        let Some(ev) = next else { break };
+        match ev? {
+            crate::agent::AgentEvent::IterationStart { iteration } => {
+                out.iterations = iteration + 1;
+                if iteration > 0 {
+                    ctx.note("round", format!("round {}", iteration + 1));
+                }
+            }
+            crate::agent::AgentEvent::Text(s) => out.text.push_str(&s),
+            crate::agent::AgentEvent::Thinking(_) => {}
+            crate::agent::AgentEvent::ToolCallStart { name, input, .. } => {
+                out.tool_calls.push(name.clone());
+                let label = crate::tool_display::tool_label(&name, &input);
+                ctx.note("tool", format!("{name}: {label}"));
+            }
+            crate::agent::AgentEvent::ToolCallResult { name, output, .. } => {
+                match &output {
+                    Ok(_) => ctx.note("ok", format!("{name} done")),
+                    Err(e) => ctx.note("err", format!("{name} failed: {}", clip_line(e, 120))),
+                }
+            }
+            crate::agent::AgentEvent::ToolCallDenied { name, .. } => {
+                out.tool_denials.push(name.clone());
+                ctx.note("err", format!("{name} denied"));
+            }
+            crate::agent::AgentEvent::UserMessageInjected { text } => {
+                // Proof that a `TaskSay` landed in this child's context.
+                ctx.note("steer", format!("got: {}", clip_line(&text, 120)));
+            }
+            crate::agent::AgentEvent::Progress(_) => {}
+            crate::agent::AgentEvent::Done { stop_reason, usage } => {
+                out.stop_reason = stop_reason;
+                out.usage = Some(usage);
+            }
+        }
+    }
+
+    // Audit: persist the child's full transcript to its own session (its
+    // intermediate steps never reach the parent context).
+    persist_subagent_session(&agent, &ctx.factory.base_model(), &ctx.role);
+
+    // dev-plan/32 Stage I: push this turn's Usage to the workflow usage
+    // sink if one is active on this thread. No-op outside `/workflow run`.
+    if let Some(u) = out.usage.as_ref() {
+        crate::workflow::push_worker_usage(u.clone());
+
+        // A subagent's tokens were otherwise DROPPED outside a workflow —
+        // the orchestrator's `cumulative_usage` only counts the parent's own
+        // provider calls, not the work a Task spawned. Attribute to the
+        // child's *effective* model (its def may pin a cheaper one).
+        let base_model = ctx.factory.base_model();
+        let attr_config = crate::config::AppConfig::load().unwrap_or_default();
+        let eff_model = subagent_model(ctx.pinned_model.as_deref(), &base_model, &attr_config);
+        let provider = crate::providers::ProviderKind::detect(eff_model)
+            .map(|k| k.name())
+            .unwrap_or("unknown");
+        if let Ok(cwd) = std::env::current_dir() {
+            crate::usage::append_usage_ledger(&cwd, &ctx.role, provider, eff_model, u);
+        }
+    }
+
+    let result = if out.text.is_empty() {
+        // L1: distinguish "did nothing" from "acted but produced no final
+        // text". A sub-agent that ran tools but stopped without a closing
+        // message used to surface a spurious "empty response" error even
+        // though work happened.
+        if out.tool_calls.is_empty() {
+            Err(Error::Agent("sub-agent returned empty response".into()))
+        } else {
+            Ok(format!(
+                "(sub-agent finished without a final text message; ran {} tool call(s): {})",
+                out.tool_calls.len(),
+                out.tool_calls.join(", ")
+            ))
+        }
+    } else {
+        Ok(out.text.clone())
+    };
+
+    if let Some(r) = &ctx.run {
+        r.finish(match &result {
+            Ok(text) => crate::subagent_runs::RunState::Done {
+                text: text.clone(),
+                stop_reason: out.stop_reason.clone(),
+            },
+            Err(e) => crate::subagent_runs::RunState::Failed {
+                error: e.to_string(),
+            },
+        });
+    }
+    result
+}
+
+fn clip_line(s: &str, max: usize) -> String {
+    let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one.chars().count() <= max {
+        one
+    } else {
+        let mut out: String = one.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
 
@@ -853,6 +1136,7 @@ mod tests {
     use futures::stream;
     use std::collections::VecDeque;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     #[test]
     fn allowlisting_a_gated_tool_opens_its_gate() {
@@ -1002,6 +1286,207 @@ mod tests {
         let tool = SubAgentTool::new(factory);
         let out = tool.call(json!({"prompt": "go"})).await.unwrap();
         assert_eq!(out, "done");
+    }
+
+    /// Prefill is the dominant latency term on a local model. A def that
+    /// declares `systemMode: minimal` must NOT inherit the parent's full
+    /// prompt — it gets the subagent preamble + its own instructions only.
+    #[tokio::test]
+    async fn system_mode_minimal_drops_the_parent_prompt() {
+        let mut def = crate::agent_defs::AgentDef {
+            name: "coder-local".into(),
+            instructions: "AGENT_RULES_HERE".into(),
+            system_mode: Some("minimal".into()),
+            ..Default::default()
+        };
+        let snapshot = Arc::new(RwLock::new(FactorySnapshot {
+            system: "PARENT_PROMPT_HERE".into(),
+            tools: ToolRegistry::new(),
+            model: "test".into(),
+            provider: Arc::new(StubProvider),
+        }));
+        let factory = ProductionAgentFactory {
+            snapshot,
+            max_iterations: 1,
+            max_depth: 3,
+            max_tokens: 8192,
+            agent_defs: AgentDefsConfig::default(),
+            approver: Arc::new(crate::permissions::DenyApprover),
+            permission_mode: PermissionMode::Auto,
+            cancel: None,
+            hooks: None,
+        };
+        let child = factory.build("go", Some(&def), 1).await.unwrap();
+        let system = child.system_text();
+        assert!(system.contains("AGENT_RULES_HERE"), "{system}");
+        assert!(
+            !system.contains("PARENT_PROMPT_HERE"),
+            "minimal system must not carry the parent prompt: {system}"
+        );
+
+        // Default (no systemMode) keeps inheriting.
+        def.system_mode = None;
+        let child = factory.build("go", Some(&def), 1).await.unwrap();
+        assert!(child.system_text().contains("PARENT_PROMPT_HERE"));
+    }
+
+    /// Provides one event after a delay, so a test can act on a run that
+    /// is still in flight.
+    struct SlowProvider(Duration);
+    #[async_trait]
+    impl Provider for SlowProvider {
+        async fn stream(&self, _r: StreamRequest) -> Result<EventStream> {
+            let d = self.0;
+            Ok(Box::pin(stream::once(async move {
+                tokio::time::sleep(d).await;
+                Ok(ProviderEvent::MessageStart {
+                    model: "test".into(),
+                })
+            })))
+        }
+    }
+
+    /// A background run must survive its parent's cancellation. The
+    /// factory wires the parent's token into every child, so without the
+    /// explicit override a parent stop killed every detached subagent —
+    /// which is exactly what happened the first time this was used for
+    /// real (a `git pull` child died 2.1s in, "cancelled by parent").
+    #[tokio::test]
+    async fn background_run_ignores_parent_cancel() {
+        let parent = CancelToken::new();
+        let factory = ProductionAgentFactory {
+            snapshot: Arc::new(RwLock::new(FactorySnapshot {
+                system: String::new(),
+                tools: ToolRegistry::new(),
+                model: "test".into(),
+                provider: Arc::new(SlowProvider(Duration::from_secs(5))),
+            })),
+            max_iterations: 1,
+            max_depth: 3,
+            max_tokens: 8192,
+            agent_defs: AgentDefsConfig::default(),
+            approver: Arc::new(crate::permissions::DenyApprover),
+            permission_mode: PermissionMode::Auto,
+            cancel: Some(parent.clone()),
+            hooks: None,
+        };
+        let tool = SubAgentTool::new(Arc::new(factory))
+            .with_background(true)
+            .with_cancel(parent.clone());
+        let out = tool.call(json!({ "prompt": "go" })).await.unwrap();
+        let id = out
+            .split("started ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("run id")
+            .trim_end_matches('.')
+            .to_string();
+        let run = crate::subagent_runs::get(&id).expect("registered run");
+
+        parent.cancel();
+        // Give the child a moment to observe the (now irrelevant) parent
+        // token before we assert it is still alive.
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert!(
+            !run.is_finished(),
+            "parent cancel must not finish a detached run: {:?}",
+            run.state()
+        );
+
+        // The run's own token still works — that is what TaskCancel fires.
+        run.cancel.cancel();
+        for _ in 0..100 {
+            if run.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(run.state(), crate::subagent_runs::RunState::Cancelled);
+    }
+
+    /// `TaskSay` only works if the child actually drains the run's queue.
+    #[tokio::test]
+    async fn build_with_queue_wires_the_injection_queue() {
+        let factory = ProductionAgentFactory {
+            snapshot: Arc::new(RwLock::new(FactorySnapshot {
+                system: String::new(),
+                tools: ToolRegistry::new(),
+                model: "test".into(),
+                provider: Arc::new(StubProvider),
+            })),
+            max_iterations: 1,
+            max_depth: 3,
+            max_tokens: 8192,
+            agent_defs: AgentDefsConfig::default(),
+            approver: Arc::new(crate::permissions::DenyApprover),
+            permission_mode: PermissionMode::Auto,
+            cancel: None,
+            hooks: None,
+        };
+        let queue: crate::subagent_runs::InjectionQueue = Default::default();
+        let child = factory
+            .build_with_queue("go", None, 1, Some(queue.clone()))
+            .await
+            .unwrap();
+        queue
+            .lock()
+            .unwrap()
+            .push_back("[from parent] narrow it".into());
+        assert_eq!(
+            child.pending_injections(),
+            1,
+            "child must read the same queue the run exposes"
+        );
+    }
+
+    /// End-to-end background path: `Task` returns a handle at once, the
+    /// child's activity lands on the run, and the result is readable via
+    /// TaskStatus once it finishes.
+    #[tokio::test]
+    async fn background_task_returns_a_handle_and_reports_completion() {
+        let factory = SimpleFactory::new(vec![vec![text_script(&[
+            "wrote tmp/x.txt",
+        ])]]);
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_seen = seen.clone();
+        let tool = SubAgentTool::new(factory)
+            .with_background(true)
+            .with_activity_sink(Arc::new(move |line: &str| {
+                sink_seen.lock().unwrap().push(line.to_string());
+            }));
+
+        let out = tool
+            .call(json!({"prompt": "write a file", "description": "smoke"}))
+            .await
+            .unwrap();
+        assert!(out.contains("started sub-"), "{out}");
+
+        // Extract the id the tool reported and wait for the child.
+        let id = out
+            .split("started ")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .expect("run id in result")
+            .trim_end_matches('.')
+            .to_string();
+        let mut status = String::new();
+        for _ in 0..100 {
+            status = crate::subagent_runs::TaskStatusTool
+                .call(json!({ "id": id }))
+                .await
+                .unwrap();
+            if status.contains("wrote tmp/x.txt") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(status.contains("wrote tmp/x.txt"), "status: {status}");
+        assert!(status.contains("done"), "status: {status}");
+        assert!(
+            seen.lock().unwrap().iter().any(|l| l.contains("done in")),
+            "activity sink should see the completion line: {:?}",
+            seen.lock().unwrap()
+        );
     }
 
     #[tokio::test]

@@ -255,6 +255,14 @@ pub struct Session {
     /// footer can be dropped back into the right place on load.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turn_usage: Vec<TurnUsage>,
+    /// Unix-seconds timestamp of each message restored from disk,
+    /// index-aligned with `messages`. Runtime appends aren't tracked here —
+    /// the live chat stamps its own clock — so a caller may only trust this
+    /// vector when `timestamps.len() == messages.len()`. Lets a reopened
+    /// session keep the "how long into the turn" offsets the ActivityLog
+    /// shows live instead of losing them at the reload boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timestamps: Vec<u64>,
 }
 
 /// One rendered per-turn usage footer plus where it belongs in the
@@ -306,6 +314,7 @@ impl Session {
             cwd: cwd.into(),
             messages: Vec::new(),
             turn_usage: Vec::new(),
+            timestamps: Vec::new(),
             title: None,
             last_saved_count: 0,
             plan: None,
@@ -333,6 +342,11 @@ impl Session {
     /// the next save.
     pub fn sync(&mut self, messages: Vec<Message>) {
         self.messages = messages;
+        // Restored timestamps can only vouch for the messages they were read
+        // with. Truncate so a shorter history can't leave stale entries
+        // pointing at the wrong message; `DisplayMessage` ignores the vector
+        // entirely unless it matches `messages.len()`.
+        self.timestamps.truncate(self.messages.len());
         if self.last_saved_count > self.messages.len() {
             self.last_saved_count = self.messages.len();
         }
@@ -748,6 +762,7 @@ impl Session {
 
         let mut header: Option<SessionHeader> = None;
         let mut messages = Vec::new();
+        let mut timestamps: Vec<u64> = Vec::new();
         let mut last_timestamp = 0u64;
         let mut turn_usage: Vec<TurnUsage> = Vec::new();
         let mut title: Option<String> = None;
@@ -937,6 +952,7 @@ impl Session {
                     last_timestamp = ev.timestamp;
                 }
                 messages.clear();
+                timestamps.clear();
                 for cm in ev.messages {
                     let role = match cm.role.as_str() {
                         "user" => crate::types::Role::User,
@@ -956,6 +972,7 @@ impl Session {
                         role,
                         content: cm.content,
                     });
+                    timestamps.push(ev.timestamp);
                 }
             } else {
                 // Message event line
@@ -1000,6 +1017,7 @@ impl Session {
                     role,
                     content: event.content,
                 });
+                timestamps.push(event.timestamp);
             }
         }
 
@@ -1061,6 +1079,7 @@ impl Session {
             provider_session_id,
             shell: h.shell,
             turn_usage,
+            timestamps,
         })
     }
 

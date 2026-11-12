@@ -792,6 +792,33 @@ fn sanitize_kms_query(q: &str) -> String {
         .collect()
 }
 
+/// Which knowledge bases a turn's pre-retrieval should score.
+///
+/// Pinned bases are always searched — they are the user saying "this session
+/// is about that". In auto mode (`kms_auto`, the default) every base on the
+/// machine is searched too, so curated knowledge is consulted without anyone
+/// ticking a box first. Order is stable: pinned order first, then the rest
+/// alphabetically, so a message's note reads the same on every replay.
+#[cfg(feature = "kms_search_index")]
+fn bases_to_search(
+    pinned: &[String],
+    auto: bool,
+    all: impl FnOnce() -> Vec<String>,
+) -> Vec<String> {
+    let mut names: Vec<String> = pinned.to_vec();
+    if !auto {
+        return names;
+    }
+    let mut rest: Vec<String> = all()
+        .into_iter()
+        .filter(|n| !names.iter().any(|p| p == n))
+        .collect();
+    rest.sort();
+    rest.dedup();
+    names.extend(rest);
+    names
+}
+
 /// Deterministic pre-retrieval (RAG, lightweight): before the model answers,
 /// search the active KMS for the user's message and splice a short **pointer
 /// list** of the matching canonical topic pages (name + one-line topic) into
@@ -817,23 +844,51 @@ pub fn build_kms_context_reminder(query: &str) -> Option<String> {
     if q.chars().count() < 4 {
         return None;
     }
-    let active = crate::config::AppConfig::load().ok()?.kms_active;
-    if active.is_empty() {
+    let cfg = crate::config::AppConfig::load().ok()?;
+    let names = bases_to_search(&cfg.kms_active, cfg.kms_auto, || {
+        crate::kms::list_all().into_iter().map(|k| k.name).collect()
+    });
+    if names.is_empty() {
         return None;
     }
 
     // (score, kms_name, page, label) for canonical topic pages above the floor.
     let mut hits: Vec<(f32, String, String, String)> = Vec::new();
-    for name in &active {
+    for name in &names {
         let Some(kref) = crate::kms::resolve(name) else {
             continue;
         };
+        // An empty base can only cost time: opening its index and searching
+        // returns nothing, and there are dozens of them. One read_dir per
+        // base is cheap next to building or loading a search index.
+        let has_pages = std::fs::read_dir(kref.pages_dir())
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if !has_pages {
+            continue;
+        }
+        // The index is only as current as the last write thClaws made.
+        // A page edited elsewhere (Obsidian, an import, another process)
+        // is invisible until this runs — which is why pre-retrieval used to
+        // surface nothing for bases whose pages never went through a KMS
+        // write. One stat per file when nothing changed, so the cost is a
+        // directory scan, not a reindex.
+        if crate::kms_search_index::ensure_fresh(&kref.root).is_err() {
+            continue;
+        }
         let Ok(idx) = crate::kms_search_index::get_or_open(&kref.root) else {
             continue;
         };
-        let Ok(found) = idx.search(&q, &[], None, 5) else {
-            continue;
-        };
+        // A whole sentence is not a query this index matches (see
+        // `keyword_query`): reduce it to keywords first, or every Thai
+        // message scores zero and retrieval silently does nothing.
+        let mut found = Vec::new();
+        for cand in idx.keyword_candidates(&q, 10) {
+            found = idx.search(&cand, &[], None, 5).unwrap_or_default();
+            if !found.is_empty() {
+                break;
+            }
+        }
         for h in found {
             if h.score < SCORE_FLOOR {
                 continue;
@@ -3263,6 +3318,112 @@ mod retry_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Auto mode is the point: a curated base the user never ticked must
+    /// still be scored. Pinned names come first so the note keeps a stable
+    /// order across replays, and the rest are alphabetical so two runs of
+    /// the same session produce the same bytes.
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn auto_mode_searches_every_base_with_pinned_ones_first() {
+        let pinned = vec!["master".to_string()];
+        let all = || vec!["nb".to_string(), "master".to_string(), "codebase".to_string()];
+        assert_eq!(
+            super::bases_to_search(&pinned, true, all),
+            vec!["master".to_string(), "codebase".to_string(), "nb".to_string()]
+        );
+    }
+
+    /// `/kms auto off` must be exactly the old behaviour: pinned bases only,
+    /// and no enumeration at all (the closure is never called).
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn auto_off_searches_only_pinned_bases() {
+        let pinned = vec!["master".to_string(), "notes".to_string()];
+        let names = super::bases_to_search(&pinned, false, || {
+            panic!("must not enumerate bases when auto is off")
+        });
+        assert_eq!(names, pinned);
+    }
+
+    /// Pinning everything is not a reason to search a base twice.
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn a_pinned_base_is_not_searched_twice() {
+        let pinned = vec!["master".to_string()];
+        let all = || vec!["master".to_string()];
+        assert_eq!(super::bases_to_search(&pinned, true, all), vec!["master".to_string()]);
+    }
+
+    /// Run a closure with cwd, HOME and the workspace root all pointed at a
+    /// throwaway directory. Project vaults resolve against
+    /// `THCLAWS_WORKSPACE_ROOT` when the host sets it, so switching cwd alone
+    /// would make these tests write into the developer's real workspace.
+    #[cfg(feature = "kms_search_index")]
+    fn with_isolated_workspace<R>(f: impl FnOnce(&std::path::Path) -> R) -> R {
+        let _g = crate::kms::test_env_lock();
+        let prev_cwd = std::env::current_dir().expect("cwd readable");
+        let prev_home = std::env::var("HOME").ok();
+        let prev_ws = std::env::var("THCLAWS_WORKSPACE_ROOT").ok();
+        let dir = tempdir().unwrap();
+
+        std::env::set_var("HOME", dir.path());
+        std::env::set_var("THCLAWS_WORKSPACE_ROOT", dir.path());
+        std::env::set_current_dir(dir.path()).expect("cwd to test dir");
+
+        let out = f(dir.path());
+
+        std::env::set_current_dir(prev_cwd).expect("cwd restore");
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_ws {
+            Some(v) => std::env::set_var("THCLAWS_WORKSPACE_ROOT", v),
+            None => std::env::remove_var("THCLAWS_WORKSPACE_ROOT"),
+        }
+        out
+    }
+
+    /// The point of auto mode, end to end: a base nobody pinned is still
+    /// searched, and its page is named on the message. This is exactly the
+    /// behaviour the sidebar checkbox used to gate.
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn auto_mode_finds_a_page_in_an_unpinned_base() {
+        let reminder = with_isolated_workspace(|_| {
+            let kref = crate::kms::create("handbook", crate::kms::KmsScope::Project)
+                .expect("create kms");
+            std::fs::write(
+                kref.pages_dir().join("leave-policy.md"),
+                "---\ntitle: นโยบายการลา\ntopic: หลักเกณฑ์การลาพักผ่อน\n---\n\n\
+                 พนักงานลาพักผ่อนได้ปีละ 15 วัน โดยแจ้งล่วงหน้า 3 วันทำการ\n",
+            )
+            .unwrap();
+            super::build_kms_context_reminder("ลาพักผ่อนต้องแจ้งล่วงหน้ากี่วัน")
+        });
+        let text = reminder.expect("auto mode must surface the page without pinning");
+        assert!(text.contains("handbook/leave-policy"), "{text}");
+    }
+
+    /// A message about code must not drag knowledge into the prompt just
+    /// because auto mode is on — the score floor is what keeps ordinary
+    /// chat cheap.
+    #[cfg(feature = "kms_search_index")]
+    #[test]
+    fn auto_mode_stays_silent_for_off_topic_messages() {
+        let reminder = with_isolated_workspace(|_| {
+            let kref = crate::kms::create("handbook", crate::kms::KmsScope::Project)
+                .expect("create kms");
+            std::fs::write(
+                kref.pages_dir().join("leave-policy.md"),
+                "---\ntitle: นโยบายการลา\n---\n\nพนักงานลาพักผ่อนได้ปีละ 15 วัน\n",
+            )
+            .unwrap();
+            super::build_kms_context_reminder("ช่วยแก้ bug ในไฟล์นี้หน่อย")
+        });
+        assert!(reminder.is_none(), "off-topic message pulled: {reminder:?}");
+    }
+
     /// dev-plan/64 P2.1. A provider's prompt cache is a prefix cache, so
     /// what one request said about a message, every later request must
     /// say again, byte for byte — and history itself must never carry it.

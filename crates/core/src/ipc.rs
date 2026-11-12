@@ -4362,6 +4362,38 @@ pub fn handle_ipc(msg: Value, ctx: &IpcContext) -> bool {
             if let Some(path) = msg.get("path").and_then(|v| v.as_str()) {
                 let p = std::path::Path::new(path);
                 if p.is_dir() {
+                    // An agent under a workspace host must NOT chdir: its cwd
+                    // is its own folder (settings, sessions, memory), and
+                    // moving it would take that state along. Switch the
+                    // WORKSPACE instead — files, bash cwd and the sandbox
+                    // follow the user's folder, the agent stays put.
+                    if crate::workdir::agent_dir().is_some() {
+                        if let Err(e) =
+                            crate::workdir::set_workspace_override(Some(p.to_path_buf()))
+                        {
+                            let payload = serde_json::json!({
+                                "type": "cwd_changed",
+                                "path": path,
+                                "ok": false,
+                                "error": format!("cannot switch workspace to '{path}': {e}"),
+                            });
+                            (ctx.dispatch)(payload.to_string());
+                            return true;
+                        }
+                        let _ = crate::sandbox::Sandbox::init();
+                        crate::recent_dirs::save_recent_dir(path);
+                        let _ = ctx
+                            .shared
+                            .input_tx
+                            .send(ShellInput::ChangeCwd(p.to_path_buf()));
+                        let payload = serde_json::json!({
+                            "type": "cwd_changed",
+                            "path": path,
+                            "ok": true,
+                        });
+                        (ctx.dispatch)(payload.to_string());
+                        return true;
+                    }
                     let _ = std::env::set_current_dir(p);
                     // A folder is chosen now, so the writes start-up held back
                     // belong here — in this folder, not whichever one the OS

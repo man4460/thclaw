@@ -197,7 +197,7 @@ pub fn build_full_system_prompt(
     }
 
     // (3) KMS
-    let kms_section = crate::kms::system_prompt_section(&config.kms_active);
+    let kms_section = crate::kms::system_prompt_section_for(&config.kms_active, config.kms_auto);
     if !kms_section.is_empty() {
         system.push_str("\n\n");
         system.push_str(&kms_section);
@@ -710,9 +710,10 @@ working on — read those spans instead of re-exploring.\n\
 Anchors turn the next session's first read into one precise slice.\n\
 - When the user corrects you, a test disproves your assumption, or an \
 approach is confirmed to work, record it: `Lesson(op: \"record\", key: \"…\", \
-text: \"…\", kind: \"correction\")`. Repeats raise the count; \
-`Lesson(op: \"distill\")` promotes twice-seen lessons into a rules file that \
-loads automatically next session, so the same mistake is not repeated.\n\
+text: \"…\", kind: \"correction\")`. `kind: \"correction\"` promotes \
+immediately; other lessons need a repeat. Promotion writes \
+`.thclaws/rules/learned.md`, which loads automatically next session — so a \
+rule that already exists there must not be re-explained or re-asked.\n\
 - After a non-trivial change, don't grade your own work: delegate an \
 adversarial pass to `Task(agent: \"code-reviewer\", prompt: \"review <what and \
 where> — does it do what it claims, what breaks, and what check proves it\")`. \

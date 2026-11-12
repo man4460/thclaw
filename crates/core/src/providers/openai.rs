@@ -996,6 +996,31 @@ impl Provider for OpenAIProvider {
                     }
                 }
             } else if status.is_client_error()
+                && body.get("tools").is_some()
+                && text.to_lowercase().contains("does not support tools")
+            {
+                // Some local models (Ollama's qwen2.5vl and other vision
+                // templates) have no function-calling support at all and
+                // reject the entire request. Retry as plain chat so the turn
+                // still produces an answer instead of a hard 400 — the model
+                // simply runs without tools.
+                let mut retry_body = body.clone();
+                if let Some(obj) = retry_body.as_object_mut() {
+                    obj.remove("tools");
+                    obj.remove("tool_choice");
+                }
+                match self.send_body(&retry_body).await {
+                    Ok(r) if r.status().is_success() => resp = r,
+                    _ => {
+                        return Err(Error::Provider(format!(
+                            "http {status}: {}\n\n⚠️ `{}` rejects function tools. Retrying without the tool schema \
+                             did not help either — check the model name and that the endpoint is a chat model.",
+                            super::redact_key(&text, &self.api_key),
+                            req.model
+                        )));
+                    }
+                }
+            } else if status.is_client_error()
                 && carries_image
                 && !too_large
                 && !super::is_quota_exceeded(&text)

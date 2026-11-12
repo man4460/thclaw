@@ -67,6 +67,11 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
             "input": crate::tool_display::redact_json_value(input),
         })
         .to_string()],
+        ViewEvent::ActivityLine(text) => vec![serde_json::json!({
+            "type": "chat_activity",
+            "text": strip_ansi(text),
+        })
+        .to_string()],
         ViewEvent::ToolCallResult {
             name,
             output,
@@ -148,6 +153,9 @@ pub fn render_chat_dispatches(ev: &ViewEvent) -> Vec<String> {
                     });
                     if let Some(t) = &m.thinking {
                         row["thinking"] = serde_json::json!(strip_ansi(t));
+                    }
+                    if let Some(ts) = m.ts_ms {
+                        row["ts"] = serde_json::json!(ts);
                     }
                     row
                 })
@@ -623,6 +631,10 @@ pub fn render_terminal_ansi(state: &mut TerminalRenderState, ev: &ViewEvent) -> 
             let body = text.replace('\n', "\r\n");
             Some(format!("\x1b[2m{body}\x1b[0m\r\n"))
         }
+        // Background subagent activity — dim, indented under the parent's
+        // turn so it reads as "work happening elsewhere", not the agent's
+        // own output.
+        ViewEvent::ActivityLine(text) => Some(format!("\x1b[2m  · {}\x1b[0m\r\n", text.replace('\n', " "))),
         ViewEvent::TurnUsage(text) => {
             // Dim per-turn token/cost footer on its own line (CLI parity).
             Some(format!("\r\n\x1b[2m{}\x1b[0m\r\n", text.replace('\n', "\r\n")))
@@ -925,21 +937,25 @@ mod chat_render_tests {
                 role: "user".into(),
                 content: "first prompt".into(),
                 thinking: None,
+                ts_ms: None,
             },
             DisplayMessage {
                 role: "assistant".into(),
                 content: "ok".into(),
                 thinking: None,
+                ts_ms: None,
             },
             DisplayMessage {
                 role: "tool".into(),
                 content: "Bash".into(),
                 thinking: None,
+                ts_ms: None,
             },
             DisplayMessage {
                 role: "user".into(),
                 content: "follow-up".into(),
                 thinking: None,
+                ts_ms: None,
             },
         ];
         let out = render_terminal_ansi(&mut state, &ViewEvent::HistoryReplaced(msgs))
@@ -969,11 +985,13 @@ mod chat_render_tests {
                 role: "user".into(),
                 content: "research \x1b[1mGPUs\x1b[0m".into(),
                 thinking: None,
+                ts_ms: None,
             },
             DisplayMessage {
                 role: "assistant".into(),
                 content: "done".into(),
                 thinking: None,
+                ts_ms: None,
             },
         ];
         let out = render_gui_shell_dispatch(&ViewEvent::HistoryReplaced(msgs))

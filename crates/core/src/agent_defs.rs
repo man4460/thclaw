@@ -85,6 +85,16 @@ pub struct AgentDef {
     /// still write via the shell.
     #[serde(default)]
     pub write_paths: Vec<String>,
+    /// Which system prompt the subagent starts from. `inherit` (default)
+    /// copies the parent's full prompt — right for a general-purpose
+    /// agent that needs the project's rules. `minimal` sends only the
+    /// subagent preamble + this def's `instructions`, which is what a
+    /// narrowly-scoped agent (a local coder with a fixed tool allow-list)
+    /// wants: prefill is the dominant cost on a local model, and the
+    /// parent's skill catalogue / memory index / KMS rules are dead
+    /// weight for a child that cannot use most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_mode: Option<String>,
 }
 
 fn default_max_iterations() -> usize {
@@ -109,6 +119,7 @@ impl Default for AgentDef {
             output_schema: None,
             input_schema: None,
             write_paths: vec![],
+            system_mode: None,
         }
     }
 }
@@ -426,6 +437,10 @@ impl AgentDefsConfig {
             output_schema,
             input_schema,
             write_paths,
+            system_mode: frontmatter
+                .get("systemMode")
+                .or_else(|| frontmatter.get("system_mode"))
+                .map(|s| s.trim().to_string()),
         })
     }
 
@@ -541,6 +556,9 @@ impl AgentDef {
         }
         if let Some(p) = &self.permission_mode {
             fm.push_str(&format!("permissionMode: {p}\n"));
+        }
+        if let Some(m) = &self.system_mode {
+            fm.push_str(&format!("systemMode: {m}\n"));
         }
         if self.max_iterations != default_max_iterations() {
             fm.push_str(&format!("maxTurns: {}\n", self.max_iterations));
@@ -1250,6 +1268,7 @@ new instructions
             output_schema: Some(serde_json::json!({"type": "object"})),
             input_schema: None,
             write_paths: vec![".thclaws/state/kms/**".into()],
+            system_mode: Some("minimal".into()),
         };
         let md = def.to_markdown();
         let parsed = AgentDefsConfig::parse_agent_md_str(&md, "fallback", None).unwrap();

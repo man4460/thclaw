@@ -344,6 +344,13 @@ pub enum ViewEvent {
         ui_resource: Option<crate::tools::UiResource>,
     },
     SlashOutput(String),
+    /// One line of background work worth watching (currently: a
+    /// subagent's tool calls and rounds while `Task` runs detached).
+    /// Distinct from `ToolCallStart` on purpose — this is a log line,
+    /// not a call the parent made, so it must not enter the tool
+    /// bubble / `chat_tool_result` pairing. The chat surface appends it
+    /// as an `activity` message; only the activity panel renders it.
+    ActivityLine(String),
     /// dev-plan/32 Tier 3 GUI approval. Fired by `/workflow run`
     /// from the chat surface — the frontend renders a review bubble
     /// with the script + Approve / Cancel / Re-author buttons. Each
@@ -576,6 +583,11 @@ pub struct DisplayMessage {
     /// live reasoning — a collapsed block above the answer — rather
     /// than inlining it into the reply text.
     pub thinking: Option<String>,
+    /// Unix ms the message was written, when the session file carried a
+    /// timestamp. Live messages get their clock from the frontend; this
+    /// only fills the gap for history restored from disk, so the
+    /// ActivityLog keeps its per-step offsets after a reload.
+    pub ts_ms: Option<u64>,
 }
 
 impl DisplayMessage {
@@ -585,21 +597,29 @@ impl DisplayMessage {
     /// render: the live view shows those footers, so history that
     /// silently omits them is a different conversation.
     pub fn from_session(session: &crate::session::Session) -> Vec<Self> {
+        // Restored timestamps are only trustworthy when they line up with the
+        // messages one-for-one (see `Session::timestamps`).
+        let ts: &[u64] = if session.timestamps.len() == session.messages.len() {
+            &session.timestamps
+        } else {
+            &[]
+        };
         let usage = &session.turn_usage;
         if usage.is_empty() {
-            return Self::from_messages(&session.messages);
+            return Self::from_messages_ts(&session.messages, ts);
         }
         let mut out: Vec<Self> = Vec::new();
         let mut next = 0usize;
         for (i, _) in session.messages.iter().enumerate() {
             // Rebuild one message at a time so a footer recorded at
             // `after = N` lands after exactly N messages' worth of rows.
-            out.extend(Self::from_messages(&session.messages[i..=i]));
+            out.extend(Self::from_messages_ts(&session.messages[i..=i], &ts[i.min(ts.len())..]));
             while next < usage.len() && usage[next].after == i + 1 {
                 out.push(DisplayMessage {
                     role: "system".into(),
                     content: usage[next].text.clone(),
                     thinking: None,
+                    ts_ms: None,
                 });
                 next += 1;
             }
@@ -611,12 +631,21 @@ impl DisplayMessage {
                 role: "system".into(),
                 content: u.text.clone(),
                 thinking: None,
+                ts_ms: None,
             });
         }
         out
     }
 
     pub fn from_messages(messages: &[Message]) -> Vec<Self> {
+        Self::from_messages_ts(messages, &[])
+    }
+
+    /// [`Self::from_messages`] plus per-message unix-second timestamps,
+    /// index-aligned with `messages`. Rows derived from one message (its
+    /// text bubble and the tool indicators it spawned) share that
+    /// message's timestamp.
+    pub fn from_messages_ts(messages: &[Message], timestamps: &[u64]) -> Vec<Self> {
         let mut out: Vec<DisplayMessage> = Vec::new();
         // Map tool_use_id → tool name so when we later see a
         // ToolResult we can ask "was the parent call AskUserQuestion?"
@@ -625,7 +654,8 @@ impl DisplayMessage {
         let mut tool_use_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
-        for m in messages {
+        for (idx, m) in messages.iter().enumerate() {
+            let ts_ms = timestamps.get(idx).map(|s| s * 1000);
             let role = match m.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
@@ -658,6 +688,7 @@ impl DisplayMessage {
                             role: "tool".into(),
                             content: name.clone(),
                             thinking: None,
+                            ts_ms,
                         });
                     }
                     ContentBlock::ToolResult {
@@ -682,6 +713,7 @@ impl DisplayMessage {
                                     role: "user".into(),
                                     content: trimmed.to_string(),
                                     thinking: None,
+                                    ts_ms,
                                 });
                             }
                         }
@@ -711,6 +743,7 @@ impl DisplayMessage {
                     role: role.to_string(),
                     content: text,
                     thinking,
+                    ts_ms,
                 });
             }
             out.extend(deferred_tools);
@@ -1939,12 +1972,35 @@ async fn run_worker(
             // hooks see Task-spawned tool calls.
             hooks: Some(hooks_arc.clone()),
         });
-        let subagent_arc: std::sync::Arc<dyn crate::tools::Tool> = std::sync::Arc::new(
+        // Workflow scripts await the subagent's text, so they keep the
+        // blocking Task tool.
+        let blocking_task: std::sync::Arc<dyn crate::tools::Tool> = std::sync::Arc::new(
             crate::subagent::SubAgentTool::new(factory.clone())
                 .with_depth(0)
                 .with_agent_defs(agent_defs_state.clone()),
         );
-        tools.register(subagent_arc.clone());
+        // The interactive agent gets the handle-based one: `Task` returns
+        // a run id immediately, activity streams into the ticker, and
+        // TaskStatus/TaskWait/TaskSay/TaskCancel let the parent watch and
+        // steer while the child works.
+        let activity_sink: std::sync::Arc<dyn Fn(&str) + Send + Sync> = {
+            let tx = events_tx.clone();
+            std::sync::Arc::new(move |line: &str| {
+                let _ = tx.send(ViewEvent::ActivityLine(line.to_string()));
+            })
+        };
+        tools.register(std::sync::Arc::new(
+            crate::subagent::SubAgentTool::new(factory.clone())
+                .with_depth(0)
+                .with_agent_defs(agent_defs_state.clone())
+                .with_background(true)
+                .with_activity_sink(activity_sink)
+                .with_parent_queue(injection_queue.clone())
+                .with_cancel(cancel.clone()),
+        ));
+        for tool in crate::subagent_runs::control_tools() {
+            tools.register(tool);
+        }
         // WorkflowRun: model-callable wrapper around `/workflow run`.
         // GUI / --serve get the same engine as the worker's agent
         // (provider + model) plus the live Task tool so scripts'
@@ -1953,7 +2009,7 @@ async fn run_worker(
             crate::tools::WorkflowRunTool::new(
                 provider.clone(),
                 config.model.clone(),
-                Some(subagent_arc),
+                Some(blocking_task),
             )
             // stream thclaws.log / subagent progress to the chat mid-run so a
             // multi-minute workflow (research) isn't silent between call+result
